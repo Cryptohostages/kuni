@@ -16,7 +16,8 @@ router = Router(name="fallback")
 async def unknown_message(message: Message, user: User, event_from_user: TgUser, repo: Repo, clock: Clock,
                           config: Settings) -> None:
     screen = await home_screen(user, event_from_user, repo, clock, config)
-    await message.answer(texts.UNKNOWN, reply_markup=screen.markup)
+    text = texts.UNKNOWN_ADMIN if config.is_admin(user.id) else texts.UNKNOWN
+    await message.answer(text, reply_markup=screen.markup)
 
 
 @router.callback_query()

@@ -18,8 +18,10 @@ async def slot_at(repo, hour, day=None, is_open=True):
     return await repo.put_slot(datetime.combine(day, datetime.min.time()).replace(hour=hour), 45, is_open)
 
 
-async def book(repo, user_id, slot_id, max_active=2):
-    return await repo.create_booking(user_id, slot_id, "study", None, NOW, LATER, max_active)
+async def book(repo, user_id, slot_id, max_active=2, max_per_day=6):
+    return await repo.create_booking(
+        user_id, slot_id, "study", None, NOW, LATER, NOW.date() + timedelta(days=14), max_active, max_per_day
+    )
 
 
 async def test_booking_is_exclusive(repo):
@@ -83,17 +85,34 @@ async def test_close_slot_only_if_free(repo):
     assert (await repo.get_slot(taken.id)).is_open
 
 
-async def test_close_and_open_day_keeps_bookings(repo):
+async def test_close_day_keeps_bookings_and_stays_closed_after_cancel(repo):
     await make_user(repo, 1)
     for hour in (10, 11, 12):
         await slot_at(repo, hour)
     taken = await slot_at(repo, 13)
-    await book(repo, 1, taken.id)
+    _, booking_id = await book(repo, 1, taken.id)
 
-    assert await repo.set_day_free_slots(NOW.date(), NOW, is_open=False) == 3
-    assert (await repo.get_slot(taken.id)).is_open
+    await repo.close_day(NOW.date(), NOW)
+    assert (await repo.get_booking(booking_id)).status is Status.ACTIVE
     assert await repo.free_slots(NOW.date(), LATER) == []
-    assert await repo.set_day_free_slots(NOW.date(), NOW, is_open=True) == 3
+    await repo.cancel_booking(booking_id, by_admin=False, reason=None, now=NOW)
+    assert await repo.free_slots(NOW.date(), LATER) == []
+
+
+async def test_admin_cancel_closes_slot(repo):
+    await make_user(repo, 1)
+    slot = await slot_at(repo, 11)
+    _, booking_id = await book(repo, 1, slot.id)
+    assert await repo.cancel_booking(booking_id, by_admin=True, reason="болею", now=NOW)
+    assert not (await repo.get_slot(slot.id)).is_open
+
+
+async def test_student_cancel_frees_slot(repo):
+    await make_user(repo, 1)
+    slot = await slot_at(repo, 11)
+    _, booking_id = await book(repo, 1, slot.id)
+    assert await repo.cancel_booking(booking_id, by_admin=False, reason=None, now=NOW)
+    assert [s.id for s in await repo.free_slots(NOW.date(), LATER)] == [slot.id]
 
 
 async def test_status_marks_and_month(repo):
@@ -111,7 +130,7 @@ async def test_ensure_slots_is_idempotent_and_respects_closed(repo):
     starts = [datetime(2026, 10, 6, 10), datetime(2026, 10, 6, 11)]
     assert await repo.ensure_slots(starts, 45) == 2
     slot = await repo.get_slot_at(starts[0])
-    await repo.set_day_free_slots(date(2026, 10, 6), NOW, is_open=False)
+    await repo.close_day(date(2026, 10, 6), NOW)
     assert await repo.ensure_slots(starts, 45) == 0
     assert not (await repo.get_slot(slot.id)).is_open
 

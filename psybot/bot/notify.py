@@ -1,7 +1,14 @@
 import logging
+from enum import Enum
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 
 from .config import Settings
 from .ui import Screen
@@ -9,16 +16,27 @@ from .ui import Screen
 log = logging.getLogger(__name__)
 
 
-async def send(bot: Bot, chat_id: int, screen: Screen) -> bool:
-    """Отправить сообщение, не падая, если человек остановил бота."""
+class Delivery(Enum):
+    OK = "ok"
+    GONE = "gone"  # человек остановил бота: повторять бессмысленно
+    FAILED = "failed"  # Telegram не принял сообщение
+    RETRY = "retry"  # сеть или Telegram недоступны, можно попробовать позже
+
+
+async def send(bot: Bot, chat_id: int, screen: Screen) -> Delivery:
+    """Отправить сообщение, не падая. В лог не пишем, кому: это может быть автор анонимного вопроса."""
     try:
         await bot.send_message(chat_id, screen.text, reply_markup=screen.markup)
+    except TelegramForbiddenError:
+        return Delivery.GONE
+    except (TelegramNetworkError, TelegramServerError, TelegramRetryAfter) as e:
+        log.warning("Telegram недоступен, сообщение не ушло: %s", e)
+        return Delivery.RETRY
     except TelegramAPIError as e:
-        log.warning("Не удалось отправить сообщение %s: %s", chat_id, e)
-        return False
-    return True
+        log.warning("Telegram не принял сообщение: %s", e)
+        return Delivery.FAILED
+    return Delivery.OK
 
 
-async def notify_admins(bot: Bot, config: Settings, screen: Screen) -> None:
-    for admin_id in config.admin_ids:
-        await send(bot, admin_id, screen)
+async def notify_admins(bot: Bot, config: Settings, screen: Screen) -> list[Delivery]:
+    return [await send(bot, admin_id, screen) for admin_id in config.admin_ids]

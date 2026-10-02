@@ -1,11 +1,14 @@
+import logging
 from datetime import time
 from functools import cached_property
 from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+from .validators import parse_time
 
 
 class Settings(BaseSettings):
@@ -24,19 +27,19 @@ class Settings(BaseSettings):
     work_days: Annotated[list[int], NoDecode] = [1, 2, 3, 4, 5]
     day_start: time = time(9, 0)
     day_end: time = time(17, 0)
-    slot_minutes: int = 45
-    break_minutes: int = 15
+    slot_minutes: int = Field(45, gt=0, le=240)
+    break_minutes: int = Field(15, ge=0, le=240)
     auto_open: bool = True
 
-    booking_days_ahead: int = 14
-    min_lead_minutes: int = 60
-    max_active_bookings: int = 2
+    booking_days_ahead: int = Field(14, ge=0, le=90)
+    min_lead_minutes: int = Field(60, ge=0)
+    max_active_bookings: int = Field(2, ge=1)
 
     remind_day_before: bool = True
-    remind_minutes_before: int = 60
+    remind_minutes_before: int = Field(60, ge=0)
     digest_time: time | None = time(8, 0)
 
-    questions_per_day: int = 5
+    questions_per_day: int = Field(5, ge=1)
 
     db_path: Path = Path("data/bot.sqlite3")
     proxy_url: str | None = None
@@ -68,7 +71,37 @@ class Settings(BaseSettings):
     @field_validator("digest_time", "proxy_url", mode="before")
     @classmethod
     def _empty_is_none(cls, value: object) -> object:
-        return None if value == "" else value
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("day_start", "day_end", "digest_time", mode="before")
+    @classmethod
+    def _parse_time(cls, value: object) -> object:
+        # pydantic хочет строго 09:00, а люди пишут и 9:00
+        if isinstance(value, str) and value.strip():
+            parsed = parse_time(value)
+            if parsed is None:
+                raise ValueError(f"время {value!r}: нужно в виде 09:00")
+            return parsed
+        return value
+
+    @field_validator("remind_minutes_before", mode="before")
+    @classmethod
+    def _empty_is_zero(cls, value: object) -> object:
+        return 0 if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("log_level")
+    @classmethod
+    def _check_log_level(cls, value: str) -> str:
+        value = value.strip().upper()
+        if value not in logging.getLevelNamesMapping():
+            raise ValueError(f"LOG_LEVEL {value!r}: бывает DEBUG, INFO, WARNING, ERROR")
+        return value
+
+    @model_validator(mode="after")
+    def _check_day(self) -> "Settings":
+        if self.day_start >= self.day_end:
+            raise ValueError("DAY_START должен быть раньше DAY_END")
+        return self
 
     @cached_property
     def tz(self) -> ZoneInfo:

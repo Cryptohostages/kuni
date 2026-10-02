@@ -37,6 +37,10 @@ def test_normalize_name(raw, expected):
         ("10-1", "10-1"),
         ("Родитель", "родитель"),
         ("педагог", "учитель"),
+        ("8 «Б»", "8Б"),
+        ('8"Б"', "8Б"),
+        ("12", None),
+        ("100", None),
         ("12А", None),
         ("0", None),
         ("абв", None),
@@ -74,12 +78,24 @@ def test_grid_custom():
 
 
 def test_config_parses_env_style_values():
-    config = make_config(admin_ids="1, 2;3", work_days="1,3,5", digest_time="")
+    config = make_config(admin_ids="1, 2;3", work_days="1,3,5", digest_time="", day_start="9:00",
+                         log_level="info", remind_minutes_before="")
     assert config.admin_ids == [1, 2, 3]
     assert config.work_days == [1, 3, 5]
     assert config.digest_time is None
+    assert config.day_start == time(9, 0)
+    assert config.log_level == "INFO"
+    assert config.remind_minutes_before == 0
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [dict(work_days="0,8"), dict(slot_minutes=0), dict(day_start="18:00"), dict(day_start="25:00"),
+     dict(log_level="loud"), dict(bot_token=" ")],
+)
+def test_config_rejects_bad_values(bad):
     with pytest.raises(ValueError):
-        make_config(work_days="0,8")
+        make_config(**bad)
 
 
 def test_dates_in_russian():

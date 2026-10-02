@@ -15,6 +15,7 @@ from .timeutil import (
     day_title,
     hm,
     month_title,
+    relative_day,
     time_range,
     when_phrase,
     when_short,
@@ -114,6 +115,12 @@ def records(span: str, bookings: list[Booking], today: date) -> Screen:
     return Screen("\n".join(lines), kb(tabs, *buttons[:60], TO_PANEL))
 
 
+def status_label(b: Booking, now: datetime) -> str:
+    if b.status == Status.ACTIVE and b.starts_at <= now:
+        return "прошла, не отмечена"
+    return STATUS_LABEL[b.status]
+
+
 def booking(b: Booking, now: datetime, back: str) -> Screen:
     lines = [
         f"<b>Запись #{b.id}</b>",
@@ -125,10 +132,10 @@ def booking(b: Booking, now: datetime, back: str) -> Screen:
         lines.append(f"💬 {esc(topic)}")
     if b.comment:
         lines.append(f"📝 <i>{esc(b.comment)}</i>")
-    lines += ["", f"Статус: <b>{STATUS_LABEL[b.status]}</b>"]
+    lines += ["", f"Статус: <b>{status_label(b, now)}</b>"]
     if b.status in (Status.CANCELLED, Status.CANCELLED_ADMIN) and b.cancel_reason:
         lines.append(f"Причина: {esc(b.cancel_reason)}")
-    lines.append(f"<i>Записались {when_short(b.created_at, now.date())}</i>")
+    lines.append(f"<i>Запись сделана {when_short(b.created_at, now.date())}</i>")
 
     rows = []
     started = b.starts_at <= now
@@ -150,15 +157,14 @@ def booking(b: Booking, now: datetime, back: str) -> Screen:
 def back_button(back: str) -> InlineKeyboardButton:
     if back.startswith("d"):
         return btn("← К окошкам дня", AdmDay(day=back[1:]))
-    if back == "q":
-        return TO_PANEL
     return btn("← К записям", AdmRecords(span=back if back in SPANS else "today"))
 
 
 def cancel_reason_prompt(b: Booking, today: date, back: str) -> Screen:
     return Screen(
         f"Отменяем запись: {esc(b.user.display)}, {when_phrase(b.starts_at, today)}.\n\n"
-        "Напиши причину одним сообщением, её получит ученик. Или отмени без объяснений.",
+        "Напишите причину одним сообщением, её получит ученик. Или отмените без объяснений.\n\n"
+        "<i>Это время закроется для записи. Открыть его снова можно в «Окошках».</i>",
         kb(
             btn("Отменить без причины", AdmBooking(id=b.id, action="no_reason", back=back), DANGER),
             btn("Не отменять", AdmBooking(id=b.id, action="view", back=back)),
@@ -199,7 +205,7 @@ def week(week_no: int, days: list[date], overview: dict[date, tuple[int, int]], 
         nav.append(btn("Дальше ›", AdmWeek(week=week_no + 1)))
     return Screen(
         f"<b>Окошки · {period}</b>\n\n"
-        "Выбери день, чтобы открыть или закрыть время.\n"
+        "Выберите день, чтобы открыть или закрыть время.\n"
         "🟢 свободные окошки, 👤 записи",
         kb(*rows, nav, TO_PANEL),
     )
@@ -209,32 +215,44 @@ def day_editor(day: date, items: list[DaySlot], grid: list[time], now: datetime,
     by_time = {i.slot.starts_at.time(): i for i in items}
     times = sorted(set(grid) | set(by_time))
     buttons = []
+    marks = False
     for t in times:
         starts = datetime.combine(day, t)
         item = by_time.get(t)
-        cb = AdmSlot(day=day_key(day), hm=t.strftime("%H%M"))
+        key = dict(day=day_key(day), hm=t.strftime("%H%M"))
         if item and item.booking:
             mark = STATUS_MARK.get(item.booking.status, "👤 ")
-            buttons.append(btn(f"{mark}{hm(t)}", cb, PRIMARY))
+            marks = marks or item.booking.status in STATUS_MARK
+            buttons.append(btn(f"{mark}{hm(t)}", AdmSlot(**key, to="view"), PRIMARY))
         elif starts < now:
             continue
         elif item and item.slot.is_open:
-            buttons.append(btn(f"🟢 {hm(t)}", cb, SUCCESS))
+            buttons.append(btn(f"🟢 {hm(t)}", AdmSlot(**key, to="close"), SUCCESS))
         else:
-            buttons.append(btn(f"▫️ {hm(t)}", cb))
-    text = (
-        f"<b>{day_title(day)}</b>\n\n"
-        "🟢 свободно — нажми, чтобы закрыть\n"
-        "▫️ закрыто — нажми, чтобы открыть\n"
-        "👤 запись — нажми, чтобы посмотреть"
-    )
-    if not buttons:
-        text = f"<b>{day_title(day)}</b>\n\nНа этот день времени больше нет."
+            buttons.append(btn(f"▫️ {hm(t)}", AdmSlot(**key, to="open")))
+
+    if buttons:
+        legend = [
+            "🟢 свободно — нажмите, чтобы закрыть",
+            "▫️ закрыто — нажмите, чтобы открыть",
+            "👤 запись — нажмите, чтобы посмотреть",
+        ]
+        if marks:
+            legend.append("✓ состоялась, ✗ неявка")
+        text = f"<b>{day_title(day)}</b>\n\n" + "\n".join(legend)
+    elif not grid and day >= now.date():
+        text = (
+            f"<b>{day_title(day)}</b>\n\nВыходной, окошек нет. "
+            "Чтобы принять кого-то в этот день, нажмите «＋ Другое время»."
+        )
+    else:
+        text = f"<b>{day_title(day)}</b>\n\nНа сегодня время закончилось."
+
     actions = []
     if any(b.text.startswith("▫️") for b in buttons):
         actions.append(btn("Открыть всё", AdmDay(day=day_key(day), action="open_all")))
     if any(b.text.startswith("🟢") for b in buttons):
-        actions.append(btn("Закрыть свободные", AdmDay(day=day_key(day), action="close_free")))
+        actions.append(btn("Закрыть день", AdmDay(day=day_key(day), action="close_day")))
     return Screen(
         text,
         kb(
@@ -248,7 +266,7 @@ def day_editor(day: date, items: list[DaySlot], grid: list[time], now: datetime,
 
 def custom_time_prompt(day: date) -> Screen:
     return Screen(
-        f"Во сколько открыть окошко {day_month(day)}? Напиши время, например <i>15:30</i>.",
+        f"Во сколько открыть окошко {day_month(day)}? Напишите время, например <i>15:30</i>.",
         kb(btn("Отмена", AdmDay(day=day_key(day)))),
     )
 
@@ -268,8 +286,10 @@ def questions(items: list[Question]) -> Screen:
 
 
 def question(q: Question, today: date) -> Screen:
+    # только день, без минут: точное время помогло бы догадаться, кто писал
+    when = relative_day(q.created_at.date(), today) or day_short(q.created_at.date())
     text = (
-        f"<b>Вопрос #{q.id}</b> · {when_short(q.created_at, today)}\n\n"
+        f"<b>Вопрос #{q.id}</b> · {when}\n\n"
         f"<blockquote>{esc(q.text)}</blockquote>\n\n"
         "<i>Автор анонимен. Ответ придёт ему в бот.</i>"
     )
@@ -289,18 +309,19 @@ def question(q: Question, today: date) -> Screen:
     )
 
 
-def answer_prompt(q: Question) -> Screen:
+def answer_prompt(q: Question, limit: int) -> Screen:
     return Screen(
         f"<b>Ответ на вопрос #{q.id}</b>\n\n<blockquote expandable>{esc(q.text)}</blockquote>\n\n"
-        "Напиши ответ одним сообщением, бот перешлёт его автору.",
+        f"Напишите ответ одним сообщением, до {limit} символов. Бот перешлёт его автору.",
         kb(btn("Отмена", AdmQuestion(id=q.id, action="view"))),
     )
 
 
 def ban_confirm(q: Question) -> Screen:
     return Screen(
-        "Автор этого вопроса больше не сможет отправлять анонимные вопросы, а его новые вопросы скроются. "
-        "Записываться на встречи он сможет, как раньше. Кто это, вы так и не узнаете.",
+        "Автор этого вопроса больше не сможет присылать анонимные вопросы, а все его вопросы без ответа "
+        "пропадут из списка. Записываться на встречи он сможет, как раньше. Кто это, вы так и не узнаете.\n\n"
+        "<b>Отменить запрет потом не получится.</b>",
         kb(
             btn("Да, запретить", AdmQuestion(id=q.id, action="ban_yes"), DANGER),
             btn("Отмена", AdmQuestion(id=q.id, action="view")),
@@ -311,20 +332,33 @@ def ban_confirm(q: Question) -> Screen:
 # --- журнал ----------------------------------------------------------------------
 
 
-def journal(months: list[tuple[int, int]], stats: dict[Status, int]) -> Screen:
+def journal(months: list[tuple[int, int]], bookings: list[Booking], now: datetime) -> Screen:
     year, month = months[0]
-    total = sum(stats.get(s, 0) for s in (Status.ACTIVE, Status.DONE, Status.MISSED))
-    cancelled = stats.get(Status.CANCELLED, 0) + stats.get(Status.CANCELLED_ADMIN, 0)
+    count = {s: 0 for s in Status}
+    upcoming = 0
+    for b in bookings:
+        if b.status == Status.ACTIVE and b.starts_at > now:
+            upcoming += 1
+        else:
+            count[b.status] += 1
+    meetings = count[Status.DONE] + count[Status.MISSED] + count[Status.ACTIVE] + upcoming
+    parts = [
+        ("состоялось", count[Status.DONE]),
+        ("неявок", count[Status.MISSED]),
+        ("без отметки", count[Status.ACTIVE]),
+        ("впереди", upcoming),
+        ("отмен", count[Status.CANCELLED] + count[Status.CANCELLED_ADMIN]),
+    ]
+    details = ", ".join(f"{name} — {n}" for name, n in parts if n)
     lines = [
         "<b>Журнал консультаций</b>",
         "",
-        f"{month_title(year, month)}: {total} {plural(total, 'встреча', 'встречи', 'встреч')}",
-        f"состоялось — {stats.get(Status.DONE, 0)}, неявок — {stats.get(Status.MISSED, 0)}, "
-        f"отмен — {cancelled}",
-        "",
-        "Выгрузка — таблица CSV, открывается в Excel и Google Таблицах.",
+        f"{month_title(year, month)}: {meetings} {plural(meetings, 'встреча', 'встречи', 'встреч')}",
     ]
-    buttons = [btn(month_title(y, m), AdmExport(ym=f"{y:04d}{m:02d}")) for y, m in months]
+    if details:
+        lines.append(cap(details))
+    lines += ["", "Нажмите на месяц, чтобы скачать таблицу (CSV, открывается в Excel и Google Таблицах)."]
+    buttons = [btn(f"📥 {month_title(y, m)}", AdmExport(ym=f"{y:04d}{m:02d}")) for y, m in months]
     return Screen("\n".join(lines), kb(*chunks(buttons, 2), TO_PANEL))
 
 
@@ -340,11 +374,11 @@ def notify_booked(b: Booking, today: date) -> Screen:
     return Screen("\n".join(lines), kb(btn("Открыть запись", AdmBooking(id=b.id, action="view", back="week"))))
 
 
-def notify_cancelled(b: Booking, today: date) -> Screen:
-    return Screen(
-        f"↩️ <b>Запись отменена учеником</b>\n\n{cap(when_short(b.starts_at, today))} · {esc(b.user.display)}\n"
-        "Это время снова свободно."
-    )
+def notify_cancelled(b: Booking, today: date, freed: bool) -> Screen:
+    text = f"↩️ <b>Запись отменена учеником</b>\n\n{cap(when_short(b.starts_at, today))} · {esc(b.user.display)}"
+    if freed:
+        text += "\nЭто время снова свободно для записи."
+    return Screen(text)
 
 
 def notify_question(q: Question) -> Screen:

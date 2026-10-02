@@ -17,7 +17,7 @@ from .timeutil import (
     when_short,
     work_days_text,
 )
-from .ui import DANGER, PRIMARY, SUCCESS, Screen, btn, cap, chunks, esc, kb, plural
+from .ui import DANGER, PRIMARY, SUCCESS, Screen, btn, cap, chunks, esc, kb, plural, short
 
 TO_MENU = btn("← В меню", Menu(to="home"))
 
@@ -33,8 +33,9 @@ def home(first_name: str, upcoming: Booking | None, today: date, cfg: Settings, 
         text += f"\n\n📌 Ближайшая встреча: <b>{when_short(upcoming.starts_at, today)}</b>{where}"
     rows = [
         btn("🗓 Записаться на встречу", Menu(to="book"), PRIMARY),
-        [btn("📌 Мои записи", Menu(to="my")), btn("✉️ Спросить анонимно", Menu(to="ask"))],
-        [btn("👤 О психологе", Menu(to="about")), btn("🆘 Нужна помощь", Menu(to="help"), DANGER)],
+        btn("✉️ Спросить анонимно", Menu(to="ask")),
+        [btn("📌 Мои записи", Menu(to="my")), btn("👤 О психологе", Menu(to="about"))],
+        btn("🆘 Нужна помощь", Menu(to="help"), DANGER),
     ]
     if is_admin:
         rows.append(btn("🔑 Кабинет психолога", Admin(to="home")))
@@ -63,6 +64,9 @@ def sos() -> Screen:
     return Screen(texts.SOS, kb(btn("✉️ Написать психологу анонимно", Menu(to="ask")), TO_MENU))
 
 
+SOS_BUTTON = btn("🆘 Нужна помощь", Menu(to="help"), DANGER)
+
+
 # --- запись ----------------------------------------------------------------------
 
 
@@ -76,9 +80,7 @@ def book_days(days: list[tuple[date, int]], today: date) -> Screen:
         )
     buttons = []
     for d, free in days:
-        label = day_short(d)
-        if d == today:
-            label = "Сегодня"
+        label = "Сегодня" if d == today else day_short(d)
         buttons.append(btn(f"{label} · {free}", BookDay(day=day_key(d))))
     return Screen(
         "<b>Запись к психологу</b>\n\nВыбери день. Цифра на кнопке — сколько свободных окошек.",
@@ -94,6 +96,15 @@ def book_limit(n: int) -> Screen:
     )
 
 
+def book_too_often() -> Screen:
+    return Screen(
+        "<b>Сегодня записей было уже много</b>\n\n"
+        "Записаться снова можно будет завтра. Если что-то срочное, задай вопрос анонимно "
+        "или нажми «🆘 Нужна помощь».",
+        kb(btn("✉️ Спросить анонимно", Menu(to="ask")), SOS_BUTTON, TO_MENU),
+    )
+
+
 def book_slots(day: date, slots: list[Slot], cfg: Settings) -> Screen:
     back = btn("← Другой день", Menu(to="book"))
     if not slots:
@@ -101,15 +112,16 @@ def book_slots(day: date, slots: list[Slot], cfg: Settings) -> Screen:
             f"<b>{day_title(day)}</b>\n\nНа этот день свободного времени уже не осталось.",
             kb(back),
         )
+    n = cfg.slot_minutes
     buttons = [btn(hm(s.starts_at), BookSlot(id=s.id)) for s in slots]
     return Screen(
-        f"<b>{day_title(day)}</b>\n\nВыбери время. Встреча длится {cfg.slot_minutes} минут.",
+        f"<b>{day_title(day)}</b>\n\nВыбери время. Встреча длится {n} {plural(n, 'минуту', 'минуты', 'минут')}.",
         kb(*chunks(buttons, 3), back),
     )
 
 
 def book_topic(slot: Slot, today: date) -> Screen:
-    buttons = [btn(label, BookTopic(code=code)) for code, label in texts.TOPICS.items()]
+    buttons = [btn(label, BookTopic(code=code, slot=slot.id)) for code, label in texts.TOPICS.items()]
     return Screen(
         f"<b>{cap(when_short(slot.starts_at, today))}</b>\n\n"
         "О чём хочется поговорить? Так психологу будет проще подготовиться. Можно и не уточнять.",
@@ -136,18 +148,24 @@ def book_confirm(slot: Slot, user: User, topic: str | None, comment: str | None,
     return Screen(
         "\n".join(lines),
         kb(
-            btn("✅ Записаться", BookConfirm(action="ok"), SUCCESS),
+            btn("✅ Записаться", BookConfirm(action="ok", slot=slot.id), SUCCESS),
             [
-                btn("✏️ Изменить комментарий" if comment else "✏️ Комментарий", BookConfirm(action="comment")),
+                btn("✏️ Комментарий", BookConfirm(action="comment", slot=slot.id)),
                 btn("👤 Имя и класс", Menu(to="profile")),
             ],
-            btn("← Назад", BookConfirm(action="back")),
+            btn("← Назад", BookConfirm(action="back", slot=slot.id)),
         ),
     )
 
 
-def comment_prompt() -> Screen:
-    return Screen(texts.COMMENT_PROMPT, kb(btn("Пропустить", BookConfirm(action="skip"))))
+def comment_prompt(slot_id: int, has_comment: bool) -> Screen:
+    if has_comment:
+        buttons = [
+            btn("🗑 Убрать", BookConfirm(action="clear", slot=slot_id)),
+            btn("← Назад", BookConfirm(action="skip", slot=slot_id)),
+        ]
+        return Screen(texts.COMMENT_PROMPT, kb(buttons))
+    return Screen(texts.COMMENT_PROMPT, kb(btn("Пропустить", BookConfirm(action="skip", slot=slot_id))))
 
 
 def reminders_promise(booking: Booking, cfg: Settings) -> str:
@@ -190,7 +208,7 @@ def my_bookings(bookings: list[Booking], user: User, today: date, cfg: Settings)
             if b.topic and b.topic != "skip":
                 line += f" · {texts.TOPICS.get(b.topic, '').lower()}"
             lines.append(line)
-            rows.append(btn(f"{when_short(b.starts_at, today)}", MyBooking(id=b.id, action="view")))
+            rows.append(btn(cap(when_short(b.starts_at, today)), MyBooking(id=b.id, action="view")))
         lines += ["", "Нажми на запись, чтобы посмотреть подробности или отменить."]
     else:
         lines.append("Пока записей нет.")
@@ -227,18 +245,18 @@ def my_cancel_confirm(booking: Booking, today: date) -> Screen:
     )
 
 
-def my_cancelled() -> Screen:
-    return Screen(
-        "Запись отменена. Это время снова свободно для других.",
-        kb(btn("🗓 Записаться на другое время", Menu(to="book"), PRIMARY), TO_MENU),
-    )
+def my_cancelled(freed: bool) -> Screen:
+    text = "Запись отменена, психолог об этом узнает."
+    if freed:
+        text += " Это время снова свободно для других."
+    return Screen(text, kb(btn("🗓 Записаться на другое время", Menu(to="book"), PRIMARY), TO_MENU))
 
 
 # --- анонимные вопросы -----------------------------------------------------------
 
 
 def ask_prompt() -> Screen:
-    return Screen(texts.ASK_PROMPT, kb(btn("Отмена", Menu(to="home"))))
+    return Screen(texts.ASK_PROMPT, kb([SOS_BUTTON, btn("Отмена", Menu(to="home"))]))
 
 
 def ask_sent() -> Screen:
@@ -250,8 +268,9 @@ def ask_sent() -> Screen:
 
 def ask_limit() -> Screen:
     return Screen(
-        "На сегодня вопросов уже много: психолог прочитает их и ответит. Новый можно будет задать завтра.",
-        kb(TO_MENU),
+        "На сегодня вопросов уже много: психолог прочитает их и ответит. Новый можно будет задать завтра.\n\n"
+        "Если плохо прямо сейчас, нажми «🆘 Нужна помощь».",
+        kb(SOS_BUTTON, TO_MENU),
     )
 
 
@@ -264,10 +283,13 @@ def ask_banned() -> Screen:
 
 def answer_to_student(question: str, answer: str) -> Screen:
     return Screen(
-        f"<b>Ответ психолога</b>\n\n<blockquote expandable>{esc(question)}</blockquote>\n\n{esc(answer)}",
+        f"<b>Ответ психолога</b>\n\n<blockquote expandable>{esc(short(question, 300))}</blockquote>\n\n"
+        f"{esc(answer)}\n\n"
+        "<i>Ответить на это сообщение не получится: если хочешь что-то добавить, задай новый вопрос. "
+        "Запись на встречу уже не анонимная, психолог увидит имя и класс.</i>",
         kb(
-            btn("🗓 Записаться на встречу", Menu(to="book")),
-            btn("✉️ Спросить ещё", Menu(to="ask")),
+            btn("✉️ Спросить ещё", Menu(to="ask", new=True)),
+            btn("🗓 Записаться на встречу", Menu(to="book", new=True)),
         ),
     )
 
@@ -291,7 +313,10 @@ def remind_day(booking: Booking, today: date, cfg: Settings) -> Screen:
 
 def remind_soon(booking: Booking, today: date, cfg: Settings) -> Screen:
     where = f", {place(cfg)}" if cfg.psychologist_room else ""
-    return Screen(f"Скоро встреча с психологом: {when_phrase(booking.starts_at, today)}{where}.")
+    return Screen(
+        f"Скоро встреча с психологом: {when_phrase(booking.starts_at, today)}{where}.",
+        kb(btn("Не получится прийти", MyBooking(id=booking.id, action="cancel"))),
+    )
 
 
 def cancelled_by_admin(booking: Booking, reason: str | None, today: date) -> Screen:
@@ -299,4 +324,4 @@ def cancelled_by_admin(booking: Booking, reason: str | None, today: date) -> Scr
     if reason:
         text += f"\n\n<blockquote>{esc(reason)}</blockquote>"
     text += "\n\nВыбери другое время, психолог будет ждать."
-    return Screen(text, kb(btn("🗓 Выбрать другое время", Menu(to="book"), PRIMARY)))
+    return Screen(text, kb(btn("🗓 Выбрать другое время", Menu(to="book", new=True), PRIMARY)))

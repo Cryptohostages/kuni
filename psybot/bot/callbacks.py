@@ -5,6 +5,7 @@ from aiogram.filters.callback_data import CallbackData
 
 class Menu(CallbackData, prefix="m"):
     to: str  # home | book | my | ask | about | help | profile
+    new: bool = False  # открыть экран новым сообщением, а не поверх этого (например, под ответом психолога)
 
 
 class BookDay(CallbackData, prefix="bd"):
@@ -17,10 +18,12 @@ class BookSlot(CallbackData, prefix="bs"):
 
 class BookTopic(CallbackData, prefix="bt"):
     code: str
+    slot: int
 
 
 class BookConfirm(CallbackData, prefix="bc"):
-    action: str  # ok | comment | skip | back
+    action: str  # ok | comment | skip | clear | back
+    slot: int
 
 
 class MyBooking(CallbackData, prefix="mb"):
@@ -42,12 +45,13 @@ class AdmWeek(CallbackData, prefix="aw"):
 
 class AdmDay(CallbackData, prefix="ad"):
     day: str
-    action: str = "view"  # view | open_all | close_free | custom
+    action: str = "view"  # view | open_all | close_day | custom
 
 
 class AdmSlot(CallbackData, prefix="as"):
     day: str
     hm: str  # HHMM
+    to: str  # open | close | view: что должно получиться, чтобы двойное нажатие не отменяло само себя
 
 
 class AdmBooking(CallbackData, prefix="ab"):
@@ -63,7 +67,3 @@ class AdmQuestion(CallbackData, prefix="aq"):
 
 class AdmExport(CallbackData, prefix="ae"):
     ym: str  # YYYYMM
-
-
-class Noop(CallbackData, prefix="x"):
-    pass

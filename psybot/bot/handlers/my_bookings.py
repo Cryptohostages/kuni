@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
@@ -38,16 +40,17 @@ async def my_booking(callback: CallbackQuery, callback_data: MyBooking, callback
         callback_answer.text = texts.STALE
         return
     now = clock.now()
+    actual = booking.status == Status.ACTIVE and booking.starts_at > now
 
     if callback_data.action == "keep":
-        callback_answer.text = "Отлично, до встречи!"
+        callback_answer.text = "Отлично, до встречи!" if actual else "Эта запись уже неактуальна"
         try:
             await callback.message.edit_reply_markup(reply_markup=None)  # type: ignore[union-attr]
         except TelegramBadRequest:
             pass
         return
 
-    if booking.status != Status.ACTIVE or booking.starts_at <= now:
+    if not actual:
         callback_answer.text = "Эта запись уже неактуальна"
         await show_list(callback, user, repo, clock, config)
         return
@@ -57,6 +60,9 @@ async def my_booking(callback: CallbackQuery, callback_data: MyBooking, callback
     elif callback_data.action == "cancel":
         await show(callback, screens.my_cancel_confirm(booking, now.date()))
     elif callback_data.action == "cancel_yes":
-        if await repo.cancel_booking(booking.id, by_admin=False, reason=None, now=now):
-            await notify_admins(bot, config, admin_screens.notify_cancelled(booking, now.date()))
-        await show(callback, screens.my_cancelled())
+        cancelled = await repo.cancel_booking(booking.id, by_admin=False, reason=None, now=now)
+        slot = await repo.get_slot(booking.slot_id)
+        freed = bool(slot and slot.is_open and slot.starts_at >= now + timedelta(minutes=config.min_lead_minutes))
+        if cancelled:
+            await notify_admins(bot, config, admin_screens.notify_cancelled(booking, now.date(), freed))
+        await show(callback, screens.my_cancelled(freed))

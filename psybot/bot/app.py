@@ -6,18 +6,17 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramAPIError
 from aiogram.fsm.storage.base import BaseStorage
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 from aiogram.types import ErrorEvent
 from aiogram.utils.callback_answer import CallbackAnswerMiddleware
 
 from .config import Settings
 from .db import Repo
 from .handlers import admin, booking, common, fallback, my_bookings, profile, questions
-from .middlewares import UserMiddleware
+from .middlewares import ERROR_TEXT, ButtonMiddleware, UserMiddleware
 from .timeutil import Clock
 
 log = logging.getLogger(__name__)
-
-ERROR_TEXT = "Что-то пошло не так. Попробуй ещё раз или начни сначала: /start"
 
 
 def create_bot(config: Settings) -> Bot:
@@ -30,9 +29,13 @@ def create_bot(config: Settings) -> Bot:
 
 
 def create_dispatcher(config: Settings, repo: Repo, clock: Clock, storage: BaseStorage | None = None) -> Dispatcher:
-    dp = Dispatcher(storage=storage, config=config, repo=repo, clock=clock)
+    # события одного человека обрабатываются по очереди: двойное нажатие не запишет дважды
+    dp = Dispatcher(
+        storage=storage, events_isolation=SimpleEventIsolation(), config=config, repo=repo, clock=clock
+    )
     dp.update.outer_middleware(UserMiddleware())
     dp.callback_query.middleware(CallbackAnswerMiddleware())
+    dp.callback_query.middleware(ButtonMiddleware())
     # порядок важен: кабинет психолога раньше общих обработчиков, «не понял» — последним
     dp.include_routers(
         admin.router,
@@ -49,11 +52,10 @@ def create_dispatcher(config: Settings, repo: Repo, clock: Clock, storage: BaseS
 
 async def on_error(event: ErrorEvent) -> bool:
     log.exception("Ошибка при обработке update %s", event.update.update_id, exc_info=event.exception)
-    try:
-        if event.update.callback_query:
-            await event.update.callback_query.answer(ERROR_TEXT, show_alert=True)
-        elif event.update.message:
+    # на нажатия кнопок ButtonMiddleware уже показал всплывашку
+    if event.update.message:
+        try:
             await event.update.message.answer(ERROR_TEXT)
-    except TelegramAPIError:
-        pass
+        except TelegramAPIError:
+            pass
     return True

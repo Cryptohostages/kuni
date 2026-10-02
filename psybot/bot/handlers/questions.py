@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, time
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -24,7 +24,8 @@ MAX_LENGTH = 2000
 async def blocked_screen(user: User, repo: Repo, clock: Clock, config: Settings) -> Screen | None:
     if user.is_banned:
         return screens.ask_banned()
-    sent = await repo.questions_since(user.id, clock.now() - timedelta(days=1))
+    today = datetime.combine(clock.now().date(), time.min)
+    sent = await repo.questions_since(user.id, today)
     if sent >= config.questions_per_day:
         return screens.ask_limit()
     return None

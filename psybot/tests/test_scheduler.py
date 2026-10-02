@@ -9,7 +9,9 @@ async def booked(h, starts: datetime, created: datetime) -> int:
     await h.repo.touch_user(STUDENT, None, "Аня", created)
     await h.repo.set_profile(STUDENT, "Аня Смирнова", "8Б")
     slot = await h.repo.put_slot(starts, 45, True)
-    _, booking_id = await h.repo.create_booking(STUDENT, slot.id, "study", None, created, created, 2)
+    _, booking_id = await h.repo.create_booking(
+        STUDENT, slot.id, "study", None, created, created, created.date() + timedelta(days=14), 2, 6
+    )
     return booking_id
 
 
@@ -91,7 +93,7 @@ async def test_digest_skipped_when_bot_started_late(h):
 async def test_fill_schedule_only_work_days(repo):
     config = make_config()
     monday = datetime(2026, 10, 5).date()
-    await scheduler.fill_schedule(repo, monday, config)
+    await scheduler.fill_schedule(repo, datetime(2026, 10, 5, 0, 0), config)
     overview = await repo.days_overview(monday, monday + timedelta(days=6), datetime(2026, 10, 5, 0, 0))
     assert sorted(d.isoweekday() for d in overview) == [1, 2, 3, 4, 5]
     assert all(free == 8 for free, _ in overview.values())
@@ -99,4 +101,4 @@ async def test_fill_schedule_only_work_days(repo):
 
 async def test_fill_schedule_disabled(repo):
     config = make_config(auto_open=False)
-    assert await scheduler.fill_schedule(repo, datetime(2026, 10, 5).date(), config) == 0
+    assert await scheduler.fill_schedule(repo, datetime(2026, 10, 5), config) == 0

@@ -7,6 +7,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, FSInputFile, InputProfilePhotoStatic
 
+from . import texts
 from .config import Settings
 
 log = logging.getLogger(__name__)
@@ -24,15 +25,11 @@ ADMIN_COMMANDS = [*COMMANDS, BotCommand(command="admin", description="Кабин
 
 
 def description(config: Settings) -> str:
-    return (
-        f"Запись к школьному психологу. {config.school_name}.\n\n"
-        "Выбери удобное время встречи или задай вопрос анонимно. "
-        "То, что ты расскажешь, останется между тобой и психологом."
-    )
+    return texts.BOT_DESCRIPTION.format(school=config.school_name)
 
 
 def short_description(config: Settings) -> str:
-    return f"Запись к школьному психологу · {config.school_name}"
+    return texts.BOT_SHORT_DESCRIPTION.format(school=config.school_name)
 
 
 async def setup_profile(bot: Bot, config: Settings) -> None:
@@ -48,7 +45,7 @@ async def setup_profile(bot: Bot, config: Settings) -> None:
         try:
             await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=admin_id))
         except TelegramAPIError as e:
-            log.warning("Не удалось поставить команды психологу %s (он уже писал боту?): %s", admin_id, e)
+            log.warning("Не удалось поставить команды психологу %s (он уже нажал «Старт»?): %s", admin_id, e)
 
 
 async def set_avatar(bot: Bot) -> None:

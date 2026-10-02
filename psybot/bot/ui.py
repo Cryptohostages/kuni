@@ -5,6 +5,8 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
+from .callbacks import Menu
+
 PRIMARY = "primary"
 SUCCESS = "success"
 DANGER = "danger"
@@ -52,12 +54,18 @@ def short(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
+def keeps_message(callback: CallbackQuery) -> bool:
+    """Кнопка под сообщением, которое надо сохранить (ответ психолога, отмена встречи)."""
+    data = callback.data or ""
+    return data.startswith(f"{Menu.__prefix__}:") and Menu.unpack(data).new
+
+
 async def show(event: Message | CallbackQuery, screen: Screen) -> None:
     """Показать экран: по нажатию кнопки — переписать то же сообщение, иначе — отправить новое."""
     if isinstance(event, Message):
         await event.answer(screen.text, reply_markup=screen.markup)
         return
-    if isinstance(event.message, Message):
+    if isinstance(event.message, Message) and not keeps_message(event):
         try:
             await event.message.edit_text(screen.text, reply_markup=screen.markup)
             return

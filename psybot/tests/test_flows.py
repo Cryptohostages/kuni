@@ -100,7 +100,8 @@ async def test_slot_taken_at_confirm(h):
     await h.send(STUDENT, "Аня Смирнова")
     await h.send(STUDENT, "8Б")
     slot = await h.repo.get_slot_at(datetime(2026, 10, 5, 15, 0))
-    await h.repo.create_booking(OTHER, slot.id, None, None, h.clock.now(), h.clock.now(), 2)
+    now = h.clock.now()
+    await h.repo.create_booking(OTHER, slot.id, None, None, now, now, now.date() + timedelta(days=14), 2, 6)
 
     await h.press(STUDENT, "✅ Записаться")
     assert h.session.alerts[-1] == ("Это время только что заняли. Выбери другое", True)
@@ -119,7 +120,7 @@ async def test_student_cancels(h):
     await register_and_book(h)
     await h.send(STUDENT, "/my")
     assert "сегодня, 10:00" in h.last(STUDENT).text
-    await h.press(STUDENT, "сегодня, 10:00")
+    await h.press(STUDENT, "Сегодня, 10:00")
     await h.press(STUDENT, "Отменить запись")
     assert "Отменить встречу сегодня в 10:00?" in h.last(STUDENT).text
     await h.press(STUDENT, "Да, отменить")
@@ -201,7 +202,7 @@ async def test_admin_toggles_slots(h):
 
     await h.press(ADMIN, "▫️ 12:00")
     assert h.last_alert == "12:00 открыто"
-    await h.press(ADMIN, "Закрыть свободные")
+    await h.press(ADMIN, "Закрыть день")
     assert not any(b.text.startswith("🟢") for b in h.last(ADMIN).buttons)
     await h.press(ADMIN, "Открыть всё")
     assert sum(b.text.startswith("🟢") for b in h.last(ADMIN).buttons) == 8
@@ -213,7 +214,7 @@ async def test_admin_adds_custom_time_on_weekend(h):
     await h.press(ADMIN, "Сб, 10 окт")
     await h.press(ADMIN, "Другое время")
     await h.send(ADMIN, "abc")
-    assert "Не понял время" in h.last(ADMIN).text
+    assert "Не получилось разобрать время" in h.last(ADMIN).text
     await h.send(ADMIN, "11:30")
     assert "🟢 11:30" in [b.text for b in h.last(ADMIN).buttons]
 
@@ -298,20 +299,36 @@ async def test_photo_instead_of_text(h):
 
 
 async def test_random_text_shows_menu(h):
-    await h.send(STUDENT, "привет")
-    assert h.last(STUDENT).text == "Не понял. Всё, что умеет бот, есть в меню."
+    await h.send(STUDENT, "мне очень плохо")
+    text = h.last(STUDENT).text
+    assert "психолог не увидит" in text and "Нужна помощь" in text
     assert "Записаться" in h.last(STUDENT).buttons[0].text
+    assert h.chat(ADMIN) == []
 
 
-async def test_stale_button_after_restart(h):
+async def test_topic_button_after_restart_keeps_its_slot(h):
     await h.send(STUDENT, "/start")
     await h.press(STUDENT, "Записаться на встречу")
     await h.press(STUDENT, "Сегодня")
     await h.press(STUDENT, "10:00")
     h.dp.fsm.storage = MemoryStorage()  # «перезапуск бота»: состояние потеряно
     await h.press(STUDENT, "Семья")
-    assert h.last_alert == "Это время уже недоступно, выбери другое"
-    assert "Запись к психологу" in h.last(STUDENT).text
+    await h.send(STUDENT, "Аня Смирнова")
+    await h.send(STUDENT, "8Б")
+    assert "10:00–10:45" in h.last(STUDENT).text and "Семья" in h.last(STUDENT).text
+
+
+async def test_confirm_button_after_restart_is_stale(h):
+    await register_and_book(h, hour="10:00")
+    await h.press(STUDENT, "← В меню")
+    await h.press(STUDENT, "Записаться на встречу")
+    await h.press(STUDENT, "Сегодня")
+    await h.press(STUDENT, "11:00")
+    await h.press(STUDENT, "Семья")
+    h.dp.fsm.storage = MemoryStorage()
+    await h.press(STUDENT, "✅ Записаться")
+    assert h.last_alert == "Эта кнопка устарела. Начни заново из меню."
+    assert len(await h.repo.upcoming_for_user(STUDENT, h.clock.now())) == 1
 
 
 async def test_journal_export(h):

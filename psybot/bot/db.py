@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -25,7 +26,8 @@ CREATE TABLE IF NOT EXISTS slots (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     starts_at  TEXT NOT NULL UNIQUE,
     minutes    INTEGER NOT NULL,
-    is_open    INTEGER NOT NULL DEFAULT 1
+    is_open    INTEGER NOT NULL DEFAULT 1,
+    auto       INTEGER NOT NULL DEFAULT 0  -- 1: создано по сетке из настроек, 0: открыто психологом вручную
 );
 
 CREATE TABLE IF NOT EXISTS bookings (
@@ -46,9 +48,10 @@ CREATE TABLE IF NOT EXISTS bookings (
 CREATE UNIQUE INDEX IF NOT EXISTS bookings_one_per_slot ON bookings(slot_id) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS bookings_by_user ON bookings(user_id, status);
 
+-- user_id нужен, только пока вопрос ждёт ответа; через сутки после ответа связь стирается
 CREATE TABLE IF NOT EXISTS questions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id      INTEGER NOT NULL REFERENCES users(id),
+    user_id      INTEGER REFERENCES users(id),
     text         TEXT NOT NULL,
     answer       TEXT,
     status       TEXT NOT NULL DEFAULT 'new',
@@ -73,9 +76,11 @@ class Status(str, Enum):
 
 class BookResult(Enum):
     OK = "ok"
+    ALREADY = "already"  # этот же человек уже записан на это время (двойное нажатие)
     TAKEN = "taken"
     UNAVAILABLE = "unavailable"
     LIMIT = "limit"
+    TOO_OFTEN = "too_often"
 
 
 @dataclass(slots=True)
@@ -104,6 +109,7 @@ class Slot:
     starts_at: datetime
     minutes: int
     is_open: bool
+    auto: bool
 
 
 @dataclass(slots=True)
@@ -133,7 +139,7 @@ class DaySlot:
 @dataclass(slots=True)
 class Question:
     id: int
-    user_id: int
+    user_id: int | None
     text: str
     answer: str | None
     status: str
@@ -162,7 +168,13 @@ def _user(row: sqlite3.Row, prefix: str = "") -> User:
 
 
 def _slot(row: sqlite3.Row) -> Slot:
-    return Slot(id=row["id"], starts_at=from_db(row["starts_at"]), minutes=row["minutes"], is_open=bool(row["is_open"]))
+    return Slot(
+        id=row["id"],
+        starts_at=from_db(row["starts_at"]),
+        minutes=row["minutes"],
+        is_open=bool(row["is_open"]),
+        auto=bool(row["auto"]),
+    )
 
 
 def _booking(row: sqlite3.Row) -> Booking:
@@ -206,6 +218,8 @@ class Repo:
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         conn = await aiosqlite.connect(path, isolation_level=None)
+        if str(path) != ":memory:":
+            os.chmod(path, 0o600)  # имена учеников и вопросы — только для владельца файла
         conn.row_factory = sqlite3.Row
         await conn.execute("PRAGMA foreign_keys = ON")
         await conn.execute("PRAGMA journal_mode = WAL")
@@ -265,7 +279,9 @@ class Repo:
             return 0
         async with self._lock:
             before = self._conn.total_changes
-            await self._conn.executemany("INSERT OR IGNORE INTO slots (starts_at, minutes) VALUES (?, ?)", rows)
+            await self._conn.executemany(
+                "INSERT OR IGNORE INTO slots (starts_at, minutes, auto) VALUES (?, ?, 1)", rows
+            )
             return self._conn.total_changes - before
 
     async def get_slot(self, slot_id: int) -> Slot | None:
@@ -342,6 +358,13 @@ class Repo:
         )
         return {date.fromisoformat(r["day"]): (r["free"], r["booked"]) for r in rows}
 
+    async def close_day(self, day: date, not_before: datetime) -> None:
+        """Закрыть всё будущее время дня. Записи остаются, но если их отменят, время уже не откроется."""
+        await self._run(
+            "UPDATE slots SET is_open = 0 WHERE substr(starts_at, 1, 10) = ? AND starts_at >= ?",
+            (day.isoformat(), to_db(not_before)),
+        )
+
     async def close_slot_if_free(self, slot_id: int) -> bool:
         changed = await self._run(
             """
@@ -352,16 +375,30 @@ class Repo:
         )
         return changed > 0
 
-    async def set_day_free_slots(self, day: date, not_before: datetime, is_open: bool) -> int:
-        """Открыть или закрыть разом все незанятые окошки дня (прошедшие не трогаем)."""
-        return await self._run(
-            """
-            UPDATE slots SET is_open = ?
-            WHERE substr(starts_at, 1, 10) = ? AND starts_at >= ? AND is_open != ?
-              AND NOT EXISTS (SELECT 1 FROM bookings b WHERE b.slot_id = slots.id AND b.status = 'active')
-            """,
-            (int(is_open), day.isoformat(), to_db(not_before), int(is_open)),
-        )
+    async def prune_auto_slots(self, not_before: datetime, keep: set[datetime], minutes: int) -> None:
+        """Убрать окошки, оставшиеся от прошлой сетки (после смены расписания в .env).
+        Окошки с действующими записями не трогаем, открытые вручную тоже."""
+        keep_keys = {to_db(dt) for dt in keep}
+        async with self._lock:
+            async with self._conn.execute(
+                """
+                SELECT s.id, s.starts_at,
+                       EXISTS (SELECT 1 FROM bookings b WHERE b.slot_id = s.id) AS referenced,
+                       EXISTS (SELECT 1 FROM bookings b WHERE b.slot_id = s.id AND b.status = 'active') AS booked
+                FROM slots s WHERE s.auto = 1 AND s.starts_at >= ?
+                """,
+                (to_db(not_before),),
+            ) as cur:
+                rows = list(await cur.fetchall())
+            for row in rows:
+                if row["booked"]:
+                    continue
+                if row["starts_at"] in keep_keys:
+                    await self._conn.execute("UPDATE slots SET minutes = ? WHERE id = ?", (minutes, row["id"]))
+                elif row["referenced"]:
+                    await self._conn.execute("UPDATE slots SET is_open = 0 WHERE id = ?", (row["id"],))
+                else:
+                    await self._conn.execute("DELETE FROM slots WHERE id = ?", (row["id"],))
 
     # --- записи ---------------------------------------------------------------
 
@@ -373,9 +410,18 @@ class Repo:
         comment: str | None,
         now: datetime,
         not_before: datetime,
+        not_after: date,
         max_active: int,
+        max_per_day: int,
     ) -> tuple[BookResult, int | None]:
         async with self._lock:
+            async with self._conn.execute(
+                "SELECT id FROM bookings WHERE slot_id = ? AND user_id = ? AND status = 'active'", (slot_id, user_id)
+            ) as cur:
+                mine = await cur.fetchone()
+            if mine:
+                return BookResult.ALREADY, mine["id"]
+
             async with self._conn.execute(
                 """
                 SELECT COUNT(*) FROM bookings b JOIN slots s ON s.id = b.slot_id
@@ -387,9 +433,22 @@ class Repo:
             if active >= max_active:
                 return BookResult.LIMIT, None
 
+            async with self._conn.execute(
+                "SELECT COUNT(*) FROM bookings WHERE user_id = ? AND created_at >= ?",
+                (user_id, to_db(now - timedelta(days=1))),
+            ) as cur:
+                (recent,) = await cur.fetchone()  # type: ignore[misc]
+            if recent >= max_per_day:
+                return BookResult.TOO_OFTEN, None
+
             async with self._conn.execute("SELECT * FROM slots WHERE id = ?", (slot_id,)) as cur:
                 row = await cur.fetchone()
-            if row is None or not row["is_open"] or row["starts_at"] < to_db(not_before):
+            if (
+                row is None
+                or not row["is_open"]
+                or row["starts_at"] < to_db(not_before)
+                or row["starts_at"] >= (not_after + timedelta(days=1)).isoformat()
+            ):
                 return BookResult.UNAVAILABLE, None
 
             try:
@@ -413,14 +472,29 @@ class Repo:
         return [_booking(r) for r in rows]
 
     async def cancel_booking(self, booking_id: int, by_admin: bool, reason: str | None, now: datetime) -> bool:
-        changed = await self._run(
-            """
-            UPDATE bookings SET status = ?, cancel_reason = ?, cancelled_at = ?
-            WHERE id = ? AND status = 'active'
-            """,
-            (Status.CANCELLED_ADMIN.value if by_admin else Status.CANCELLED.value, reason, to_db(now), booking_id),
+        """Если отменяет психолог, время закрывается: раз он отменил, значит, сам в это время занят."""
+        status = Status.CANCELLED_ADMIN if by_admin else Status.CANCELLED
+        async with self._lock:
+            cur = await self._conn.execute(
+                """
+                UPDATE bookings SET status = ?, cancel_reason = ?, cancelled_at = ?
+                WHERE id = ? AND status = 'active'
+                """,
+                (status.value, reason, to_db(now), booking_id),
+            )
+            if cur.rowcount == 0:
+                return False
+            if by_admin:
+                await self._conn.execute(
+                    "UPDATE slots SET is_open = 0 WHERE id = (SELECT slot_id FROM bookings WHERE id = ?)", (booking_id,)
+                )
+            return True
+
+    async def active_booking(self, user_id: int, slot_id: int) -> Booking | None:
+        row = await self._one(
+            _BOOKING_SELECT + " WHERE b.user_id = ? AND b.slot_id = ? AND b.status = 'active'", (user_id, slot_id)
         )
-        return changed > 0
+        return _booking(row) if row else None
 
     async def set_status(self, booking_id: int, status: Status) -> bool:
         changed = await self._run(
@@ -489,6 +563,19 @@ class Repo:
             (answer, to_db(now), question_id),
         )
         return changed > 0
+
+    async def reopen_question(self, question_id: int) -> None:
+        await self._run(
+            "UPDATE questions SET answer = NULL, status = 'new', answered_at = NULL WHERE id = ? AND status = 'answered'",
+            (question_id,),
+        )
+
+    async def forget_authors(self, before: datetime) -> None:
+        """Стереть связь «вопрос → автор» у вопросов, с которыми уже разобрались."""
+        await self._run(
+            "UPDATE questions SET user_id = NULL WHERE status != 'new' AND user_id IS NOT NULL AND created_at < ?",
+            (to_db(before),),
+        )
 
     async def hide_question(self, question_id: int) -> None:
         await self._run("UPDATE questions SET status = 'hidden' WHERE id = ? AND status = 'new'", (question_id,))

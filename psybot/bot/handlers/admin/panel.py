@@ -12,7 +12,7 @@ from ... import admin_screens, screens
 from ...callbacks import Admin, AdmBooking, AdmRecords
 from ...db import Repo, Status
 from ...filters import TEXT
-from ...notify import send
+from ...notify import Delivery, send
 from ...states import AdminInput
 from ...timeutil import Clock
 from ...ui import Screen, show
@@ -75,8 +75,8 @@ async def booking_action(callback: CallbackQuery, callback_data: AdmBooking, cal
 
     await state.clear()
     if action == "no_reason":
-        note = await cancel(booking.id, None, repo, clock, bot)
-        callback_answer.text = note
+        callback_answer.text = await cancel(booking.id, None, repo, clock, bot)
+        callback_answer.show_alert = True
     elif action in ("done", "missed") and started:
         status = Status.DONE if action == "done" else Status.MISSED
         if booking.status != status and await repo.set_status(booking.id, status):
@@ -102,7 +102,7 @@ async def got_cancel_reason(message: Message, state: FSMContext, repo: Repo, clo
 @router.message(AdminInput.answer, ~F.text)
 @router.message(AdminInput.custom_time, ~F.text)
 async def not_text(message: Message) -> None:
-    await message.answer("Сюда нужен текст. Или нажми «Отмена» выше.")
+    await message.answer("Сюда нужен текст. Или нажмите кнопку под сообщением выше.")
 
 
 async def cancel(booking_id: int, reason: str | None, repo: Repo, clock: Clock, bot: Bot) -> str:
@@ -112,7 +112,9 @@ async def cancel(booking_id: int, reason: str | None, repo: Repo, clock: Clock, 
         return "Эту запись уже нельзя отменить"
     if not await repo.cancel_booking(booking_id, by_admin=True, reason=reason, now=now):
         return "Запись уже отменена"
-    delivered = await send(bot, booking.user.id, screens.cancelled_by_admin(booking, reason, now.date()))
-    if delivered:
-        return "Запись отменена, ученик получил уведомление"
-    return "Запись отменена, но уведомление не дошло: похоже, ученик остановил бота"
+    delivery = await send(bot, booking.user.id, screens.cancelled_by_admin(booking, reason, now.date()))
+    if delivery is Delivery.OK:
+        return "Запись отменена, ученик получил уведомление. Это время закрыто для записи"
+    if delivery is Delivery.GONE:
+        return "Запись отменена, но уведомление не дошло: ученик остановил бота"
+    return "Запись отменена, но уведомление не дошло: Telegram не ответил. Лучше предупредить ученика лично"

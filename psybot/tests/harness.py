@@ -72,6 +72,8 @@ class FakeSession(BaseSession):
         self.messages: dict[tuple[int, int], Sent] = {}
         self.log: list[tuple[str, object]] = []
         self.alerts: list[tuple[str | None, bool]] = []
+        # чат → ошибка, которую вернёт Telegram при отправке туда сообщения
+        self.failures: dict[int, Exception] = {}
 
     async def close(self) -> None:
         pass
@@ -92,6 +94,8 @@ class FakeSession(BaseSession):
     async def make_request(self, bot: Bot, method: TelegramMethod, timeout: int | None = None):
         self.log.append((type(method).__name__, method))
         if isinstance(method, SendMessage):
+            if int(method.chat_id) in self.failures:
+                raise self.failures[int(method.chat_id)]
             self._validate(method.text, method.reply_markup)
             sent = Sent(int(method.chat_id), next(self.ids), method.text, method.reply_markup)
             self.messages[(sent.chat_id, sent.message_id)] = sent
@@ -162,11 +166,11 @@ class Harness:
         self.users[user_id] = User(id=user_id, is_bot=False, first_name=first_name, username=username)
         return self.users[user_id]
 
-    async def send(self, user_id: int, text: str) -> None:
+    async def send(self, user_id: int, text: str, chat: Chat | None = None) -> None:
         message = Message(
             message_id=next(self.session.ids),
             date=datetime.now(),
-            chat=Chat(id=user_id, type="private"),
+            chat=chat or Chat(id=user_id, type="private"),
             from_user=self.users[user_id],
             text=text,
         )

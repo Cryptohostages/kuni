@@ -2,7 +2,7 @@
 
 import csv
 import io
-from collections import Counter
+from datetime import datetime
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -33,7 +33,7 @@ def cell(value: str) -> str:
     return "'" + value if value[:1] in ("=", "+", "-", "@") else value
 
 
-def to_csv(bookings: list[Booking]) -> bytes:
+def to_csv(bookings: list[Booking], now: datetime) -> bytes:
     out = io.StringIO()
     writer = csv.writer(out, delimiter=";")
     writer.writerow(["Дата", "Время", "Ученик", "Класс", "Тема", "Комментарий", "Статус", "Причина отмены",
@@ -46,7 +46,7 @@ def to_csv(bookings: list[Booking]) -> bytes:
             b.user.class_name or "",
             admin_screens.topic_label(b.topic) or "",
             cell(b.comment or ""),
-            admin_screens.STATUS_LABEL[b.status],
+            admin_screens.status_label(b, now),
             cell(b.cancel_reason or ""),
             b.created_at.strftime("%d.%m.%Y %H:%M"),
         ])
@@ -57,10 +57,10 @@ def to_csv(bookings: list[Booking]) -> bytes:
 @router.callback_query(Admin.filter(F.to == "journal"))
 async def journal(callback: CallbackQuery, state: FSMContext, repo: Repo, clock: Clock) -> None:
     await state.clear()
-    today = clock.now().date()
-    months = recent_months(today.year, today.month, MONTHS_BACK)
-    stats = Counter(b.status for b in await repo.month_bookings(*months[0]))
-    await show(callback, admin_screens.journal(months, stats))
+    now = clock.now()
+    months = recent_months(now.year, now.month, MONTHS_BACK)
+    bookings = await repo.month_bookings(*months[0])
+    await show(callback, admin_screens.journal(months, bookings, now))
 
 
 @router.callback_query(AdmExport.filter())
@@ -71,8 +71,8 @@ async def export(callback: CallbackQuery, callback_data: AdmExport, callback_ans
     if not bookings:
         callback_answer.text = "За этот месяц записей нет"
         return
-    document = BufferedInputFile(to_csv(bookings), filename=f"journal-{year}-{month:02d}.csv")
     now = clock.now()
+    document = BufferedInputFile(to_csv(bookings, now), filename=f"journal-{year}-{month:02d}.csv")
     caption = f"Журнал за {month_title(year, month).lower()}. Выгружен {now:%d.%m.%Y %H:%M}"
     if isinstance(callback.message, Message):
         await callback.message.answer_document(document, caption=caption)

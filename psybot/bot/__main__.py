@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import logging
+import os
 import sys
 
 from . import scheduler
@@ -14,6 +15,7 @@ from .timeutil import Clock
 
 
 async def main() -> None:
+    os.umask(0o077)  # база с именами и вопросами доступна только тому, кто запустил бота
     config = Settings()  # type: ignore[call-arg]
     logging.basicConfig(level=config.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     bot = create_bot(config)

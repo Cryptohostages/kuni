@@ -50,7 +50,7 @@ async def repo():
 
 @pytest_asyncio.fixture
 async def h(config, repo, clock) -> Harness:
-    await fill_schedule(repo, clock.now().date(), config)
+    await fill_schedule(repo, clock.now(), config)
     harness = Harness(config, repo, clock)
     harness.user(ADMIN, "Мария")
     harness.user(STUDENT, "Аня", "anya_s")
