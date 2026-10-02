@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 from aiogram.exceptions import TelegramForbiddenError, TelegramNetworkError
 from aiogram.methods import SendMessage
-from aiogram.types import Chat
+from aiogram.types import Chat, Message, Update
 
 from bot import scheduler
 from bot.callbacks import AdmSlot, BookConfirm
@@ -89,12 +89,11 @@ async def test_too_many_bookings_in_a_day(h):
     for hour in ("10:00", "11:00", "12:00", "13:00", "14:00", "15:00"):
         await register_and_book(h, hour=hour)
     await h.send(STUDENT, "/book")
-    await h.press(STUDENT, "Сегодня")
-    await h.press(STUDENT, "16:00")
-    await h.press(STUDENT, "Семья")
-    await h.press(STUDENT, "✅ Записаться")
     assert "Сегодня записей было уже много" in h.last(STUDENT).text
     assert sum("Новая запись" in m.text for m in h.chat(ADMIN)) == 6
+    h.clock.current = datetime(2026, 10, 6, 8, 0)  # на следующий день снова можно
+    await h.send(STUDENT, "/book")
+    assert "Запись к психологу" in h.last(STUDENT).text
 
 
 async def test_admin_cancel_closes_time_and_keeps_notice(h):
@@ -186,7 +185,7 @@ async def test_crash_shows_alert(h, monkeypatch):
     await h.send(STUDENT, "/start")
     monkeypatch.setattr(h.repo, "free_days", boom)
     await h.press(STUDENT, "Записаться на встречу")
-    assert h.session.alerts[-1] == ("Что-то пошло не так. Попробуй ещё раз или начни сначала: /start", True)
+    assert h.session.alerts[-1] == ("Что-то пошло не так. Можно попробовать ещё раз или начать сначала: /start", True)
 
 
 async def test_group_chats_are_ignored(h):
@@ -334,3 +333,172 @@ async def test_stale_comment_button_from_other_flow(h):
     screen = h.last(STUDENT)
     await h.press_data(STUDENT, screen, BookConfirm(action="comment", slot=999).pack())
     assert h.last_alert == "Это время уже недоступно, выбери другое"
+
+
+# --- после второй проверки --------------------------------------------------------
+
+V1_SCHEMA = """
+CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, tg_name TEXT NOT NULL DEFAULT '', full_name TEXT,
+                    class_name TEXT, is_banned INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL);
+CREATE TABLE slots (id INTEGER PRIMARY KEY AUTOINCREMENT, starts_at TEXT NOT NULL UNIQUE, minutes INTEGER NOT NULL,
+                    is_open INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE bookings (id INTEGER PRIMARY KEY AUTOINCREMENT, slot_id INTEGER NOT NULL REFERENCES slots(id),
+                       user_id INTEGER NOT NULL REFERENCES users(id), topic TEXT, comment TEXT,
+                       status TEXT NOT NULL DEFAULT 'active', cancel_reason TEXT, created_at TEXT NOT NULL,
+                       cancelled_at TEXT, reminded_day INTEGER NOT NULL DEFAULT 0,
+                       reminded_soon INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE questions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id),
+                        text TEXT NOT NULL, answer TEXT, status TEXT NOT NULL DEFAULT 'new',
+                        created_at TEXT NOT NULL, answered_at TEXT);
+CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT INTO users (id, tg_name, created_at) VALUES (501, 'Аня', '2026-10-01 10:00');
+INSERT INTO slots (starts_at, minutes) VALUES ('2026-10-06 15:30', 45);
+INSERT INTO questions (user_id, text, status, created_at, answered_at)
+    VALUES (501, 'вопрос', 'answered', '2026-10-01 10:00', '2026-10-01 11:00');
+"""
+
+
+async def test_database_from_first_version_is_migrated(tmp_path):
+    import sqlite3
+
+    from bot.db import Repo
+
+    path = tmp_path / "bot.sqlite3"
+    with sqlite3.connect(path) as conn:
+        conn.executescript(V1_SCHEMA)
+    repo = await Repo.open(path)
+    try:
+        now = datetime(2026, 10, 5, 8, 30)
+        slot = await repo.get_slot(1)
+        assert slot.starts_at == datetime(2026, 10, 6, 15, 30) and not slot.auto
+        await scheduler.fill_schedule(repo, now, make_config())
+        assert (await repo.get_slot(1)).is_open, "окошко из старой версии не должно пропасть"
+        await repo.forget_authors(now)
+        assert (await repo.get_question(1)).user_id is None
+    finally:
+        await repo.close()
+
+
+async def test_schedule_change_does_not_overlap_meetings_or_reopen_closed_days(h):
+    await register_and_book(h, day="Вт, 6 окт", hour="10:00")
+    await h.send(ADMIN, "/admin")
+    await h.press(ADMIN, "🗓 Окошки")
+    await h.press(ADMIN, "Чт, 8 окт")
+    await h.press(ADMIN, "Закрыть день")
+
+    new = make_config(day_start="09:30", day_end="17:30")
+    await scheduler.fill_schedule(h.repo, h.clock.now(), new)
+
+    tuesday = await h.repo.free_slots(datetime(2026, 10, 6).date(), h.clock.now())
+    assert "10:30" not in [s.starts_at.strftime("%H:%M") for s in tuesday]  # пересекается с записью на 10:00
+    assert "11:30" in [s.starts_at.strftime("%H:%M") for s in tuesday]
+    assert await h.repo.free_slots(datetime(2026, 10, 8).date(), h.clock.now()) == []
+
+
+async def test_reopened_leftover_slot_survives_the_night(h):
+    h.config.work_days = [1, 3, 5]  # вторник больше не рабочий
+    await scheduler.fill_schedule(h.repo, h.clock.now(), h.config)
+    await h.send(ADMIN, "/admin")
+    await h.press(ADMIN, "🗓 Окошки")
+    tuesday = datetime(2026, 10, 6).date()
+    await h.press_data(ADMIN, h.last(ADMIN), AdmSlot(day="20261006", hm="1000", to="open").pack())
+    await scheduler.fill_schedule(h.repo, h.clock.now() + timedelta(days=1), h.config)
+    assert [s.starts_at.hour for s in await h.repo.free_slots(tuesday, h.clock.now())] == [10]
+
+
+async def test_open_all_prefers_custom_times_without_auto_open(h):
+    h.config.auto_open = False
+    await scheduler.fill_schedule(h.repo, h.clock.now(), h.config)
+    await h.send(ADMIN, "/admin")
+    await h.press(ADMIN, "🗓 Окошки")
+    await h.press(ADMIN, "Вт, 6 окт")
+    await h.press(ADMIN, "Открыть всё")
+    await h.press(ADMIN, "🟢 10:00")
+    await h.press(ADMIN, "Другое время")
+    await h.send(ADMIN, "10:10")
+    await h.press(ADMIN, "Закрыть день")
+    await h.press(ADMIN, "Открыть всё")
+    opened = [b.text for b in h.last(ADMIN).buttons if b.text.startswith("🟢")]
+    assert "🟢 10:10" in opened and "🟢 10:00" not in opened
+
+
+async def test_digest_is_not_repeated_for_admins_who_got_it(h):
+    h.config.admin_ids = [ADMIN, 998]
+    h.user(998, "Второй")
+    await register_and_book(h, hour="11:00")
+    h.session.failures[998] = TelegramNetworkError(method=None, message="timeout")
+    for minute in (0, 1, 2):
+        await scheduler.send_digest(h.bot, h.repo, datetime(2026, 10, 5, 8, minute), h.config)
+    assert sum("Сегодня 1 встреча" in m.text for m in h.chat(ADMIN)) == 1
+    del h.session.failures[998]
+    await scheduler.send_digest(h.bot, h.repo, datetime(2026, 10, 5, 8, 3), h.config)
+    assert sum("Сегодня 1 встреча" in m.text for m in h.chat(998)) == 1
+
+
+async def test_author_forgotten_a_day_after_answer(h):
+    await ask_and_open_reply(h)
+    h.clock.current = datetime(2026, 10, 5, 20, 0)
+    await h.send(ADMIN, "Ответ")
+    h.clock.current = datetime(2026, 10, 6, 20, 1)
+    await scheduler.tick(h.bot, h.repo, h.clock, h.config, {"filled": h.clock.now().date()})
+    assert (await h.repo.get_question(1)).user_id is None
+
+
+async def test_custom_time_right_after_unbooked_past_slot(h):
+    h.clock.current = datetime(2026, 10, 5, 12, 5)
+    await h.send(ADMIN, "/admin")
+    await h.press(ADMIN, "🗓 Окошки")
+    await h.press(ADMIN, "Сегодня")
+    await h.press(ADMIN, "Другое время")
+    await h.send(ADMIN, "12:10")  # окошко 12:00 уже началось и никем не занято — оно не мешает
+    assert "Окошко на 12:10 открыто." in [m.text for m in h.chat(ADMIN)]
+
+
+async def test_reply_to_notification_answers_question(h):
+    await h.send(STUDENT, "/ask")
+    await h.send(STUDENT, "Как перестать нервничать?")
+    notice = h.last(ADMIN)
+    message = Message(
+        message_id=9000, date=datetime.now(), chat=Chat(id=ADMIN, type="private"), from_user=h.users[ADMIN],
+        text="Попробуй дышать медленно", reply_to_message=h.session._message(notice),
+    )
+    await h.dp.feed_update(h.bot, Update(update_id=9000, message=message))
+    assert "Попробуй дышать медленно" in h.last(STUDENT).text
+    assert "Ответ отправлен." in [m.text for m in h.chat(ADMIN)]
+
+
+async def test_long_cancel_reason_is_not_cut(h):
+    await register_and_book(h, hour="13:00")
+    await h.send(ADMIN, "/admin")
+    await h.press(ADMIN, "📋 Записи")
+    await h.press(ADMIN, "13:00 · Аня Смирнова")
+    await h.press(ADMIN, "Отменить запись")
+    await h.send(ADMIN, "очень " * 120)
+    assert "Сократите" in h.last(ADMIN).text
+    assert (await h.repo.upcoming_for_user(STUDENT, h.clock.now()))
+
+
+async def test_flood_control_log_has_no_chat_id(h, caplog):
+    from aiogram.exceptions import TelegramRetryAfter
+
+    caplog.set_level(logging.INFO)
+    await ask_and_open_reply(h)
+    h.session.failures[STUDENT] = TelegramRetryAfter(
+        method=SendMessage(chat_id=STUDENT, text="x"), message=f"Flood control in chat {STUDENT}", retry_after=5
+    )
+    await h.send(ADMIN, "Ответ")
+    assert str(STUDENT) not in caplog.text
+
+
+async def test_old_back_button_returns_to_its_own_time(h):
+    await register_and_book(h, hour="10:00")
+    await h.send(STUDENT, "/book")
+    await h.press(STUDENT, "Сегодня")
+    await h.press(STUDENT, "11:00")
+    await h.press(STUDENT, "Семья")
+    old, back = h.find_button(STUDENT, "← Назад")
+    await h.send(STUDENT, "/book")
+    await h.press(STUDENT, "Сегодня")
+    await h.press(STUDENT, "12:00")
+    await h.press_data(STUDENT, old, back.callback_data)
+    assert "11:00" in old.text and "О чём хочется поговорить" in old.text

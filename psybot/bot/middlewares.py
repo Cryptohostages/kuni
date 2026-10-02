@@ -12,7 +12,7 @@ from .timeutil import Clock
 
 Handler = Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]]
 
-ERROR_TEXT = "Что-то пошло не так. Попробуй ещё раз или начни сначала: /start"
+ERROR_TEXT = "Что-то пошло не так. Можно попробовать ещё раз или начать сначала: /start"
 
 
 class UserMiddleware(BaseMiddleware):

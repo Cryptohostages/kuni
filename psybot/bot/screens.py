@@ -38,6 +38,7 @@ def home(first_name: str, upcoming: Booking | None, today: date, cfg: Settings, 
         btn("🆘 Нужна помощь", Menu(to="help"), DANGER),
     ]
     if is_admin:
+        text += "\n\n<i>Так меню видят ученики. Ваш кабинет — по кнопке ниже или командой /admin.</i>"
         rows.append(btn("🔑 Кабинет психолога", Admin(to="home")))
     return Screen(text, kb(*rows))
 
@@ -75,8 +76,9 @@ def book_days(days: list[tuple[date, int]], today: date) -> Screen:
         return Screen(
             "<b>Свободных окошек сейчас нет</b>\n\n"
             "Психолог открывает новое время по ходу недели, загляни через пару дней. "
-            "Если вопрос не ждёт, задай его анонимно: ответ придёт сюда.",
-            kb(btn("✉️ Спросить анонимно", Menu(to="ask")), TO_MENU),
+            "Если вопрос не ждёт, задай его анонимно: ответ придёт сюда. "
+            "А если плохо прямо сейчас, нажми «🆘 Нужна помощь».",
+            kb(btn("✉️ Спросить анонимно", Menu(to="ask")), SOS_BUTTON, TO_MENU),
         )
     buttons = []
     for d, free in days:
@@ -89,9 +91,10 @@ def book_days(days: list[tuple[date, int]], today: date) -> Screen:
 
 
 def book_limit(n: int) -> Screen:
+    cancel = "Или отмени её" if n == 1 else "Или отмени одну из текущих"
     return Screen(
         f"<b>У тебя уже {n} {plural(n, 'запись', 'записи', 'записей')}</b>\n\n"
-        "Новую можно будет сделать после встречи. Или отмени одну из текущих, если планы поменялись.",
+        f"Новую можно будет сделать после встречи. {cancel}, если планы поменялись.",
         kb(btn("📌 Мои записи", Menu(to="my"), PRIMARY), TO_MENU),
     )
 
@@ -276,8 +279,9 @@ def ask_limit() -> Screen:
 
 def ask_banned() -> Screen:
     return Screen(
-        "Отправлять анонимные вопросы тебе сейчас нельзя. Записаться на встречу можно, как и раньше.",
-        kb(btn("🗓 Записаться на встречу", Menu(to="book")), TO_MENU),
+        "Отправлять анонимные вопросы тебе нельзя. Записаться на встречу можно, как и раньше.\n\n"
+        "Если плохо прямо сейчас, нажми «🆘 Нужна помощь».",
+        kb(btn("🗓 Записаться на встречу", Menu(to="book")), SOS_BUTTON, TO_MENU),
     )
 
 
@@ -285,8 +289,9 @@ def answer_to_student(question: str, answer: str) -> Screen:
     return Screen(
         f"<b>Ответ психолога</b>\n\n<blockquote expandable>{esc(short(question, 300))}</blockquote>\n\n"
         f"{esc(answer)}\n\n"
-        "<i>Ответить на это сообщение не получится: если хочешь что-то добавить, задай новый вопрос. "
-        "Запись на встречу уже не анонимная, психолог увидит имя и класс.</i>",
+        "<i>Ответить на это сообщение не получится. Если хочешь что-то добавить, задай новый вопрос "
+        "и коротко напомни, о чём шла речь. Если захочешь прийти на встречу, учти: при записи психолог "
+        "увидит имя и класс.</i>",
         kb(
             btn("✉️ Спросить ещё", Menu(to="ask", new=True)),
             btn("🗓 Записаться на встречу", Menu(to="book", new=True)),
@@ -320,8 +325,8 @@ def remind_soon(booking: Booking, today: date, cfg: Settings) -> Screen:
 
 
 def cancelled_by_admin(booking: Booking, reason: str | None, today: date) -> Screen:
-    text = f"<b>Встреча отменена</b>\n\nВстречу {when_phrase(booking.starts_at, today)} пришлось отменить."
+    text = f"<b>Встреча отменена</b>\n\nПсихолог отменил встречу {when_phrase(booking.starts_at, today)}."
     if reason:
         text += f"\n\n<blockquote>{esc(reason)}</blockquote>"
-    text += "\n\nВыбери другое время, психолог будет ждать."
+    text += "\n\nМожно выбрать другое время."
     return Screen(text, kb(btn("🗓 Выбрать другое время", Menu(to="book", new=True), PRIMARY)))

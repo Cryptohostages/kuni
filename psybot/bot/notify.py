@@ -30,10 +30,11 @@ async def send(bot: Bot, chat_id: int, screen: Screen) -> Delivery:
     except TelegramForbiddenError:
         return Delivery.GONE
     except (TelegramNetworkError, TelegramServerError, TelegramRetryAfter) as e:
-        log.warning("Telegram недоступен, сообщение не ушло: %s", e)
+        # текст ошибки флуд-контроля содержит номер чата, поэтому пишем только тип
+        log.warning("Telegram недоступен (%s), сообщение не ушло", type(e).__name__)
         return Delivery.RETRY
     except TelegramAPIError as e:
-        log.warning("Telegram не принял сообщение: %s", e)
+        log.warning("Telegram не принял сообщение: %s", e.message)
         return Delivery.FAILED
     return Delivery.OK
 

@@ -10,7 +10,7 @@ from aiogram.utils.callback_answer import CallbackAnswer
 from ... import admin_screens
 from ...callbacks import AdmDay, AdmSlot, AdmWeek
 from ...config import Settings
-from ...db import DaySlot, Repo, Status
+from ...db import DaySlot, Repo, find_clash
 from ...filters import TEXT
 from ...states import AdminInput
 from ...timeutil import Clock, day_key, grid_times, hm, is_work_day, parse_day_key, time_range
@@ -30,19 +30,6 @@ def week_of(day: date, today: date) -> int:
 
 def in_range(day: date, today: date, config: Settings) -> bool:
     return today <= day <= today + timedelta(days=config.admin_days_ahead)
-
-
-def clash(starts: datetime, minutes: int, items: list[DaySlot]) -> DaySlot | None:
-    """Открытое или занятое окошко, которое пересекается по времени с новым."""
-    end = starts + timedelta(minutes=minutes)
-    for item in items:
-        slot = item.slot
-        if slot.starts_at == starts:
-            continue
-        busy = slot.is_open or (item.booking is not None and item.booking.status == Status.ACTIVE)
-        if busy and slot.starts_at < end and starts < slot.starts_at + timedelta(minutes=slot.minutes):
-            return item
-    return None
 
 
 def clash_text(item: DaySlot) -> str:
@@ -66,24 +53,32 @@ async def day_screen(day: date, repo: Repo, clock: Clock, config: Settings) -> S
     return admin_screens.day_editor(day, items, grid, now, week_of(day, now.date()))
 
 
-async def open_all(day: date, repo: Repo, now: datetime, config: Settings) -> None:
+def on_grid(starts: datetime, config: Settings) -> bool:
+    """Время из сетки настроек: такие окошки бот ведёт сам, остальные — открытые вручную."""
+    return config.auto_open and is_work_day(starts.date(), config) and starts.time() in grid_times(config)
+
+
+async def open_all(day: date, repo: Repo, now: datetime, config: Settings) -> int:
     """Открыть сетку дня и окошки, добавленные вручную, не допуская пересечений.
     Добавленные вручную важнее: их открывают первыми, а пересекающееся с ними время сетки — нет."""
     items = await repo.day_slots(day)
     by_start = {item.slot.starts_at: item for item in items}
-    manual = sorted(item.slot.starts_at for item in items if not item.slot.auto)
     grid = [datetime.combine(day, t) for t in grid_times(config)] if is_work_day(day, config) else []
-    for starts in manual + [dt for dt in grid if dt not in manual]:
+    manual = sorted(item.slot.starts_at for item in items if item.slot.starts_at not in grid)
+    opened = 0
+    for starts in manual + grid:
         item = by_start.get(starts)
         if starts < now or (item and item.slot.is_open):
             continue
         minutes = item.slot.minutes if item else config.slot_minutes
-        if clash(starts, minutes, items) is None:
-            slot = await repo.put_slot(starts, minutes, is_open=True)
+        if find_clash(starts, minutes, items, now) is None:
+            slot = await repo.put_slot(starts, minutes, is_open=True, auto=on_grid(starts, config))
+            opened += 1
             if item:
                 item.slot = slot
             else:
                 items.append(DaySlot(slot, None))
+    return opened
 
 
 @router.callback_query(AdmWeek.filter())
@@ -109,8 +104,10 @@ async def day_action(callback: CallbackQuery, callback_data: AdmDay, callback_an
         return
 
     if callback_data.action == "open_all":
-        await open_all(day, repo, now, config)
-        callback_answer.text = "Время на этот день открыто"
+        if await open_all(day, repo, now, config):
+            callback_answer.text = "Время на этот день открыто"
+        else:
+            callback_answer.text = "Открыть ничего не получилось: время пересекается с другими окошками"
     elif callback_data.action == "close_day":
         await repo.close_day(day, now)
         callback_answer.text = "День закрыт. Записи остались, их можно отменить по одной"
@@ -141,11 +138,11 @@ async def slot_action(callback: CallbackQuery, callback_data: AdmSlot, callback_
         minutes = item.slot.minutes if item else config.slot_minutes
         if item and item.slot.is_open:
             callback_answer.text = f"{hm(starts)} открыто"
-        elif other := clash(starts, minutes, items):
+        elif other := find_clash(starts, minutes, items, now):
             callback_answer.text = clash_text(other)
             callback_answer.show_alert = True
         else:
-            await repo.put_slot(starts, minutes, is_open=True)
+            await repo.put_slot(starts, minutes, is_open=True, auto=on_grid(starts, config))
             callback_answer.text = f"{hm(starts)} открыто"
     await show(callback, await day_screen(day, repo, clock, config))
 
@@ -165,10 +162,10 @@ async def got_custom_time(message: Message, state: FSMContext, repo: Repo, clock
     items = await repo.day_slots(day)
     existing = next((i for i in items if i.slot.starts_at == starts), None)
     minutes = existing.slot.minutes if existing else config.slot_minutes
-    if other := clash(starts, minutes, items):
+    if other := find_clash(starts, minutes, items, clock.now()):
         await message.answer(f"{clash_text(other)} или напишите другое время.")
         return
     await state.clear()
-    await repo.put_slot(starts, minutes, is_open=True)
+    await repo.put_slot(starts, minutes, is_open=True, auto=on_grid(starts, config))
     await message.answer(f"Окошко на {hm(t)} открыто.")
     await show(message, await day_screen(day, repo, clock, config))

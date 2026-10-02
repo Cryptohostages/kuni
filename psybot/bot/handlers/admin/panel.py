@@ -20,6 +20,7 @@ from ...ui import Screen, show
 router = Router(name="admin_panel")
 
 MEETINGS = (Status.ACTIVE, Status.DONE, Status.MISSED)
+REASON_LIMIT = 500
 
 
 def day_bounds(first: date, days: int = 1) -> tuple[datetime, datetime]:
@@ -90,8 +91,12 @@ async def booking_action(callback: CallbackQuery, callback_data: AdmBooking, cal
 @router.message(AdminInput.cancel_reason, TEXT)
 async def got_cancel_reason(message: Message, state: FSMContext, repo: Repo, clock: Clock, bot: Bot) -> None:
     data = await state.get_data()
+    reason = (message.text or "").strip()
+    if len(reason) > REASON_LIMIT:
+        await message.answer(f"Получилось {len(reason)} символов, а можно до {REASON_LIMIT}. Сократите, пожалуйста.")
+        return
     await state.clear()
-    note = await cancel(data["booking_id"], (message.text or "").strip()[:500], repo, clock, bot)
+    note = await cancel(data["booking_id"], reason, repo, clock, bot)
     booking = await repo.get_booking(data["booking_id"])
     assert booking is not None
     await message.answer(note)

@@ -103,7 +103,7 @@ def records(span: str, bookings: list[Booking], today: date) -> Screen:
         label = f"{mark}{hm(b.starts_at)} · {b.user.display}"
         if span == "week":
             label = f"{day_short(b.starts_at.date())}, {label}"
-        buttons.append(btn(short(label, 40), AdmBooking(id=b.id, action="view", back=span)))
+        buttons.append(btn(short(label, 32), AdmBooking(id=b.id, action="view", back=span)))
     if not bookings:
         lines.append("Записей нет.")
     elif any(b.status != Status.ACTIVE for b in bookings):
@@ -178,7 +178,9 @@ def cancel_reason_prompt(b: Booking, today: date, back: str) -> Screen:
 def week(week_no: int, days: list[date], overview: dict[date, tuple[int, int]], work_days: set[int],
          today: date, max_week: int) -> Screen:
     first, last = days[0], days[-1]
-    if first.month == last.month:
+    if first == last:
+        period = day_month(first)
+    elif first.month == last.month:
         period = f"{first.day}–{day_month(last)}"
     else:
         period = f"{day_month(first)} – {day_month(last)}"
@@ -277,7 +279,7 @@ def custom_time_prompt(day: date) -> Screen:
 def questions(items: list[Question]) -> Screen:
     if not items:
         return Screen("<b>Анонимные вопросы</b>\n\nНовых вопросов нет.", kb(TO_PANEL))
-    rows = [btn(f"#{q.id} · {short(q.text, 32)}", AdmQuestion(id=q.id, action="view")) for q in items[:40]]
+    rows = [btn(f"#{q.id} · {short(q.text, 24)}", AdmQuestion(id=q.id, action="view")) for q in items[:40]]
     n = len(items)
     return Screen(
         f"<b>Анонимные вопросы</b>\n\n{n} {plural(n, 'новый вопрос', 'новых вопроса', 'новых вопросов')} без ответа.",
@@ -291,7 +293,8 @@ def question(q: Question, today: date) -> Screen:
     text = (
         f"<b>Вопрос #{q.id}</b> · {when}\n\n"
         f"<blockquote>{esc(q.text)}</blockquote>\n\n"
-        "<i>Автор анонимен. Ответ придёт ему в бот.</i>"
+        "<i>Автор анонимен: бот перешлёт ему ваш ответ, а кто это, вы не узнаете. "
+        "«Скрыть без ответа» убирает вопрос из списка, автор ничего не получит.</i>"
     )
     if q.status != "new":
         text += "\n\n" + ("Ответ уже отправлен." if q.status == "answered" else "Вопрос скрыт.")
@@ -301,7 +304,7 @@ def question(q: Question, today: date) -> Screen:
         kb(
             [
                 btn("✍️ Ответить", AdmQuestion(id=q.id, action="reply"), PRIMARY),
-                btn("Скрыть", AdmQuestion(id=q.id, action="hide")),
+                btn("Скрыть без ответа", AdmQuestion(id=q.id, action="hide")),
             ],
             btn("🚫 Запретить автору писать", AdmQuestion(id=q.id, action="ban")),
             btn("← К вопросам", Admin(to="questions")),

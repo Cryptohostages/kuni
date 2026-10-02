@@ -37,6 +37,8 @@ async def days_screen(user: User, repo: Repo, clock: Clock, config: Settings) ->
     upcoming = await repo.upcoming_for_user(user.id, now)
     if len(upcoming) >= config.max_active_bookings:
         return screens.book_limit(len(upcoming))
+    if await repo.booked_today(user.id, now) >= MAX_BOOKINGS_PER_DAY:
+        return screens.book_too_often()
     days = await repo.free_days(not_before(now, config), last_day(now, config))
     return screens.book_days(days, now.date())
 
@@ -82,7 +84,7 @@ async def pick_slot(callback: CallbackQuery, callback_data: BookSlot, callback_a
                     state: FSMContext, repo: Repo, clock: Clock, config: Settings) -> None:
     slot = await free_slot(callback_data.id, repo, clock, config)
     if slot is None:
-        callback_answer.text = "Это время уже заняли, выбери другое"
+        callback_answer.text = "Это время уже недоступно, выбери другое"
         taken = await repo.get_slot(callback_data.id)
         await show(callback, await day_screen(taken.starts_at.date() if taken else None, repo, clock, config))
         return
@@ -121,22 +123,27 @@ async def confirm_screen(state: FSMContext, user: User, repo: Repo, clock: Clock
     return screens.book_confirm(slot, user, data["topic"], data.get("comment"), config)
 
 
-async def flow_slot(callback_data: BookConfirm, state: FSMContext, repo: Repo, clock: Clock,
-                    config: Settings) -> Slot | None:
-    """Окошко с кнопки, если это та же запись, что сейчас в процессе, и время ещё свободно."""
-    data = await state.get_data()
-    if data.get("slot_id") != callback_data.slot:
+async def same_flow(callback: CallbackQuery, callback_data: BookConfirm, callback_answer: CallbackAnswer,
+                    state: FSMContext, user: User, repo: Repo, clock: Clock, config: Settings) -> Slot | None:
+    """Окошко с кнопки, если это та же запись, что сейчас в процессе. Иначе показывает, что делать дальше:
+    время занято — список дней, кнопка со старого экрана — выбор темы для того времени."""
+    slot = await free_slot(callback_data.slot, repo, clock, config)
+    if slot is None:
+        callback_answer.text = "Это время уже недоступно, выбери другое"
+        await show(callback, await days_screen(user, repo, clock, config))
         return None
-    return await free_slot(callback_data.slot, repo, clock, config)
+    if (await state.get_data()).get("slot_id") != slot.id:
+        await state.set_data({"slot_id": slot.id})
+        await show(callback, screens.book_topic(slot, clock.now().date()))
+        return None
+    return slot
 
 
 @router.callback_query(BookConfirm.filter(F.action.in_({"skip", "clear", "back"})))
 async def confirm_nav(callback: CallbackQuery, callback_data: BookConfirm, callback_answer: CallbackAnswer,
                       state: FSMContext, user: User, repo: Repo, clock: Clock, config: Settings) -> None:
-    slot = await flow_slot(callback_data, state, repo, clock, config)
+    slot = await same_flow(callback, callback_data, callback_answer, state, user, repo, clock, config)
     if slot is None:
-        callback_answer.text = "Это время уже недоступно, выбери другое"
-        await show(callback, await days_screen(user, repo, clock, config))
         return
     if callback_data.action == "back":
         await show(callback, screens.book_topic(slot, clock.now().date()))
@@ -150,9 +157,7 @@ async def confirm_nav(callback: CallbackQuery, callback_data: BookConfirm, callb
 @router.callback_query(BookConfirm.filter(F.action == "comment"))
 async def ask_comment(callback: CallbackQuery, callback_data: BookConfirm, callback_answer: CallbackAnswer,
                       state: FSMContext, user: User, repo: Repo, clock: Clock, config: Settings) -> None:
-    if await flow_slot(callback_data, state, repo, clock, config) is None:
-        callback_answer.text = "Это время уже недоступно, выбери другое"
-        await show(callback, await days_screen(user, repo, clock, config))
+    if await same_flow(callback, callback_data, callback_answer, state, user, repo, clock, config) is None:
         return
     data = await state.get_data()
     await state.set_state(BookingState.comment)

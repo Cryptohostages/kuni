@@ -3,13 +3,25 @@ import os
 import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, timedelta
 from enum import Enum
 from pathlib import Path
 
 import aiosqlite
 
 from .timeutil import from_db, to_db
+
+# user_id нужен, только пока вопрос ждёт ответа; через сутки после ответа связь стирается
+QUESTIONS = """
+CREATE TABLE IF NOT EXISTS questions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER REFERENCES users(id),
+    text         TEXT NOT NULL,
+    answer       TEXT,
+    status       TEXT NOT NULL DEFAULT 'new',
+    created_at   TEXT NOT NULL,
+    answered_at  TEXT
+);"""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -48,22 +60,13 @@ CREATE TABLE IF NOT EXISTS bookings (
 CREATE UNIQUE INDEX IF NOT EXISTS bookings_one_per_slot ON bookings(slot_id) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS bookings_by_user ON bookings(user_id, status);
 
--- user_id нужен, только пока вопрос ждёт ответа; через сутки после ответа связь стирается
-CREATE TABLE IF NOT EXISTS questions (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id      INTEGER REFERENCES users(id),
-    text         TEXT NOT NULL,
-    answer       TEXT,
-    status       TEXT NOT NULL DEFAULT 'new',
-    created_at   TEXT NOT NULL,
-    answered_at  TEXT
-);
+{questions}
 
 CREATE TABLE IF NOT EXISTS kv (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
-"""
+""".replace("{questions}", QUESTIONS)
 
 
 class Status(str, Enum):
@@ -205,6 +208,40 @@ def _question(row: sqlite3.Row) -> Question:
     )
 
 
+async def _migrate(conn: aiosqlite.Connection) -> None:
+    """Базу, созданную первой версией бота, доводим до текущей схемы."""
+    async with conn.execute("PRAGMA table_info(slots)") as cur:
+        slot_columns = {row["name"] for row in await cur.fetchall()}
+    if "auto" not in slot_columns:
+        # старые окошки считаем открытыми вручную: так их не тронет уборка старой сетки
+        await conn.execute("ALTER TABLE slots ADD COLUMN auto INTEGER NOT NULL DEFAULT 0")
+    async with conn.execute("PRAGMA table_info(questions)") as cur:
+        user_id = next(row for row in await cur.fetchall() if row["name"] == "user_id")
+    if user_id["notnull"]:
+        await conn.executescript(
+            "BEGIN;"
+            "ALTER TABLE questions RENAME TO questions_old;"
+            + QUESTIONS
+            + "INSERT INTO questions SELECT id, user_id, text, answer, status, created_at, answered_at"
+            " FROM questions_old;"
+            "DROP TABLE questions_old;"
+            "COMMIT;"
+        )
+
+
+def find_clash(starts: datetime, minutes: int, items: list[DaySlot], now: datetime) -> DaySlot | None:
+    """Открытое или занятое окошко дня, которое пересекается по времени с новым."""
+    end = starts + timedelta(minutes=minutes)
+    for item in items:
+        slot = item.slot
+        booked = item.booking is not None and item.booking.status == Status.ACTIVE
+        if slot.starts_at == starts or (not booked and slot.starts_at < now):
+            continue
+        if (slot.is_open or booked) and slot.starts_at < end and starts < slot.starts_at + timedelta(minutes=slot.minutes):
+            return item
+    return None
+
+
 class Repo:
     """Вся работа с базой. Одно соединение на бота, запросы идут по очереди через lock,
     поэтому транзакции разных обработчиков не перемешиваются."""
@@ -224,6 +261,7 @@ class Repo:
         await conn.execute("PRAGMA foreign_keys = ON")
         await conn.execute("PRAGMA journal_mode = WAL")
         await conn.executescript(SCHEMA)
+        await _migrate(conn)
         return cls(conn)
 
     async def close(self) -> None:
@@ -273,14 +311,15 @@ class Repo:
 
     # --- окошки ---------------------------------------------------------------
 
-    async def ensure_slots(self, starts: Iterable[datetime], minutes: int) -> int:
-        rows = [(to_db(dt), minutes) for dt in starts]
+    async def ensure_slots(self, starts: Iterable[datetime], minutes: int, is_open: bool = True) -> int:
+        """Добавить окошки сетки, которых ещё нет. Существующие не трогаем."""
+        rows = [(to_db(dt), minutes, int(is_open)) for dt in starts]
         if not rows:
             return 0
         async with self._lock:
             before = self._conn.total_changes
             await self._conn.executemany(
-                "INSERT OR IGNORE INTO slots (starts_at, minutes, auto) VALUES (?, ?, 1)", rows
+                "INSERT OR IGNORE INTO slots (starts_at, minutes, is_open, auto) VALUES (?, ?, ?, 1)", rows
             )
             return self._conn.total_changes - before
 
@@ -292,14 +331,15 @@ class Repo:
         row = await self._one("SELECT * FROM slots WHERE starts_at = ?", (to_db(starts_at),))
         return _slot(row) if row else None
 
-    async def put_slot(self, starts_at: datetime, minutes: int, is_open: bool) -> Slot:
+    async def put_slot(self, starts_at: datetime, minutes: int, is_open: bool, auto: bool = False) -> Slot:
+        """auto — окошко из сетки настроек; остальные открыты психологом вручную и при смене сетки остаются."""
         row = await self._one(
             """
-            INSERT INTO slots (starts_at, minutes, is_open) VALUES (?, ?, ?)
-            ON CONFLICT(starts_at) DO UPDATE SET is_open = excluded.is_open
+            INSERT INTO slots (starts_at, minutes, is_open, auto) VALUES (?, ?, ?, ?)
+            ON CONFLICT(starts_at) DO UPDATE SET is_open = excluded.is_open, auto = excluded.auto
             RETURNING *
             """,
-            (to_db(starts_at), minutes, int(is_open)),
+            (to_db(starts_at), minutes, int(is_open), int(auto)),
         )
         assert row is not None
         return _slot(row)
@@ -433,12 +473,7 @@ class Repo:
             if active >= max_active:
                 return BookResult.LIMIT, None
 
-            async with self._conn.execute(
-                "SELECT COUNT(*) FROM bookings WHERE user_id = ? AND created_at >= ?",
-                (user_id, to_db(now - timedelta(days=1))),
-            ) as cur:
-                (recent,) = await cur.fetchone()  # type: ignore[misc]
-            if recent >= max_per_day:
+            if await self._booked_today(user_id, now) >= max_per_day:
                 return BookResult.TOO_OFTEN, None
 
             async with self._conn.execute("SELECT * FROM slots WHERE id = ?", (slot_id,)) as cur:
@@ -459,6 +494,19 @@ class Repo:
             except sqlite3.IntegrityError:
                 return BookResult.TAKEN, None
             return BookResult.OK, cur.lastrowid
+
+    async def _booked_today(self, user_id: int, now: datetime) -> int:
+        async with self._conn.execute(
+            "SELECT COUNT(*) FROM bookings WHERE user_id = ? AND created_at >= ?",
+            (user_id, now.date().isoformat()),
+        ) as cur:
+            (count,) = await cur.fetchone()  # type: ignore[misc]
+        return count
+
+    async def booked_today(self, user_id: int, now: datetime) -> int:
+        """Сколько раз человек записывался сегодня, включая отменённые записи."""
+        async with self._lock:
+            return await self._booked_today(user_id, now)
 
     async def get_booking(self, booking_id: int) -> Booking | None:
         row = await self._one(_BOOKING_SELECT + " WHERE b.id = ?", (booking_id,))
@@ -573,7 +621,10 @@ class Repo:
     async def forget_authors(self, before: datetime) -> None:
         """Стереть связь «вопрос → автор» у вопросов, с которыми уже разобрались."""
         await self._run(
-            "UPDATE questions SET user_id = NULL WHERE status != 'new' AND user_id IS NOT NULL AND created_at < ?",
+            """
+            UPDATE questions SET user_id = NULL
+            WHERE status != 'new' AND user_id IS NOT NULL AND COALESCE(answered_at, created_at) < ?
+            """,
             (to_db(before),),
         )
 
@@ -595,7 +646,3 @@ class Repo:
             (key, value),
         )
 
-
-def slot_starts(days: Iterable[date], times: Iterable[time]) -> list[datetime]:
-    times = list(times)
-    return [datetime.combine(d, t) for d in days for t in times]

@@ -82,7 +82,7 @@ async def test_slot_taken_while_choosing(h):
     await register_and_book(h, hour="14:00")
 
     await h.press(OTHER, "14:00")
-    assert h.last_alert == "Это время уже заняли, выбери другое"
+    assert h.last_alert == "Это время уже недоступно, выбери другое"
     assert "14:00" not in [b.text for b in h.last(OTHER).buttons]
 
 
@@ -266,7 +266,7 @@ async def test_ban_stops_questions_but_not_booking(h):
     assert (await h.repo.get_user(STUDENT)).is_banned
 
     await h.send(STUDENT, "/ask")
-    assert "Отправлять анонимные вопросы тебе сейчас нельзя" in h.last(STUDENT).text
+    assert "Отправлять анонимные вопросы тебе нельзя" in h.last(STUDENT).text
     await register_and_book(h)
     assert "Запись готова" in h.last(STUDENT).text
 
